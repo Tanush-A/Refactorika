@@ -4,3 +4,7 @@ __pycache__/
 *.pyc
 .env
 demo_repo/.git/
+
+# Benchmark data + run artifacts (fetched/generated, never committed)
+eval/external/
+eval/results/
