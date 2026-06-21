@@ -6,18 +6,23 @@ of qualname -> set[qualname] edges, and exposes entry-point heuristics.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Optional
 
-from refactorika.analysis.parser import get_tree, iter_symbols, iter_imports
-
+from refactorika.analysis.parser import get_tree, iter_imports, iter_symbols
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-_SKIP_DIRS = {".venv", "__pycache__", ".git", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
+_SKIP_DIRS = {
+    ".venv",
+    "__pycache__",
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+}
 
 _ENTRY_DECORATORS = {"app.route", "click.command", "pytest.fixture"}
 
@@ -49,41 +54,84 @@ def _collect_py_files(path: str) -> tuple[list[Path], Path]:
     return files, p
 
 
-def _scan_all_names_in_source(source: str) -> set[str]:
-    """Return every bare word that appears in string literals in the source."""
+def _string_literal_text(node) -> Optional[str]:
+    """Return the decoded inner text of a string node, or None if not a string."""
+    if node.type != "string":
+        return None
+    parts: list[str] = []
+    for child in node.children:
+        if child.type == "string_content" and child.text:
+            parts.append(child.text.decode())
+    if parts:
+        return "".join(parts)
+    # Fallback: strip the surrounding quotes from the raw text.
+    raw = node.text.decode() if node.text else ""
+    return raw.strip("\"'")
+
+
+def _parse_all_from_tree(tree) -> set[str]:
+    """Collect names listed in a module-level ``__all__`` via the AST.
+
+    Handles list **and** tuple (and set) literals, including multi-line ones —
+    anything regex-over-source missed.
+    """
     names: set[str] = set()
-    for m in re.finditer(r'["\']([A-Za-z_][A-Za-z0-9_]*)["\']', source):
-        names.add(m.group(1))
+    root = tree.root_node
+    for node in root.children:
+        # __all__ = [...] / (...) is an expression_statement wrapping an assignment.
+        assign = node
+        if node.type == "expression_statement" and node.children:
+            assign = node.children[0]
+        if assign.type != "assignment":
+            continue
+        left = assign.child_by_field_name("left")
+        right = assign.child_by_field_name("right")
+        if left is None or right is None:
+            continue
+        if not (
+            left.type == "identifier" and left.text and left.text.decode() == "__all__"
+        ):
+            continue
+        if right.type not in ("list", "tuple", "set"):
+            continue
+        for elem in right.children:
+            text = _string_literal_text(elem)
+            if text and text.isidentifier():
+                names.add(text)
     return names
 
 
-def _parse_all_in_source(source: str) -> set[str]:
-    """Collect names that appear in __all__ list literals."""
-    names: set[str] = set()
-    m = re.search(r"__all__\s*=\s*\[([^\]]*)\]", source)
-    if m:
-        for nm in re.findall(r'["\']([A-Za-z_][A-Za-z0-9_]*)["\']', m.group(1)):
-            names.add(nm)
-    return names
+def _find_main_block(tree):
+    """Return the ``if __name__ == "__main__":`` if_statement node, or None."""
+    root = tree.root_node
+    for node in root.children:
+        if node.type != "if_statement":
+            continue
+        cond = node.child_by_field_name("condition")
+        if cond is None or cond.type != "comparison_operator":
+            continue
+        cond_text = cond.text.decode() if cond.text else ""
+        # Normalize quotes/spacing: __name__ == "__main__" or '__main__'.
+        normalized = cond_text.replace(" ", "")
+        if "__name__==" in normalized and "__main__" in normalized:
+            return node
+    return None
 
 
-def _has_main_block(source: str) -> bool:
-    return bool(re.search(r'if\s+__name__\s*==\s*["\']__main__["\']', source))
+def _has_main_block(tree) -> bool:
+    return _find_main_block(tree) is not None
 
 
-def _main_block_calls(source: str) -> set[str]:
-    """Heuristically extract function names called in the __main__ block."""
-    names: set[str] = set()
-    m = re.search(
-        r'if\s+__name__\s*==\s*["\']__main__["\']\s*:(.*)',
-        source,
-        re.DOTALL,
-    )
-    if m:
-        block = m.group(1)
-        for call in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", block):
-            names.add(call)
-    return names
+def _main_block_calls(tree) -> set[str]:
+    """Extract function names called anywhere inside the ``__main__`` block.
+
+    Walks the full block subtree (multi-line and nested calls included) via the
+    AST instead of a single-line regex.
+    """
+    block = _find_main_block(tree)
+    if block is None:
+        return set()
+    return set(_iter_calls_from_node(block))
 
 
 def _decorator_texts(node) -> list[str]:
@@ -101,6 +149,7 @@ def _decorator_texts(node) -> list[str]:
 # ---------------------------------------------------------------------------
 # CallGraph
 # ---------------------------------------------------------------------------
+
 
 class CallGraph:
     """Directed call graph over all symbols in a Python project."""
@@ -127,7 +176,6 @@ class CallGraph:
         # per_file: module -> { local_name -> qualname,  import_alias -> qualname }
         per_file_symbols: dict[str, dict[str, str]] = {}  # module -> {name: qualname}
         per_file_imports: dict[str, dict[str, str]] = {}  # module -> {alias: qualname}
-        file_sources: dict[str, str] = {}  # module -> source text
         file_trees: dict[str, object] = {}  # module -> tree
         file_paths: dict[str, str] = {}  # module -> filesystem path
 
@@ -139,7 +187,6 @@ class CallGraph:
                 continue
 
             module = _module_name(fpath, root)
-            file_sources[module] = source
             file_trees[module] = tree
             file_paths[module] = str(fpath)
 
@@ -167,18 +214,27 @@ class CallGraph:
                 pass
             per_file_imports[module] = import_map
 
+        # Build a project-wide unqualified-name -> qualname map, but ONLY for
+        # names that are unique across the whole project. Ambiguous names (e.g.
+        # two modules each defining `compute`) are deliberately excluded so a
+        # bare call to an ambiguous name resolves to no edge instead of guessing.
+        _unq_counts: dict[str, list[str]] = {}
+        for qualname in cg._nodes:
+            _unq_counts.setdefault(qualname.split(".")[-1], []).append(qualname)
+        unique_by_unqualified: dict[str, str] = {
+            unq: quals[0] for unq, quals in _unq_counts.items() if len(quals) == 1
+        }
+
         # Pass 2: build edges + detect entry points
         for module, tree in file_trees.items():
-            source = file_sources[module]
             sym_map = per_file_symbols.get(module, {})
             import_map = per_file_imports.get(module, {})
 
-            all_dunder_names = _parse_all_in_source(source)
-            main_calls = _main_block_calls(source)
-            is_test_file = (
-                Path(file_paths[module]).name.startswith("test_")
-                or Path(file_paths[module]).name.endswith("_test.py")
-            )
+            all_dunder_names = _parse_all_from_tree(tree)
+            main_calls = _main_block_calls(tree)
+            is_test_file = Path(file_paths[module]).name.startswith("test_") or Path(
+                file_paths[module]
+            ).name.endswith("_test.py")
 
             for node, kind, name, line in iter_symbols(tree):
                 qualname = f"{module}.{name}"
@@ -221,7 +277,14 @@ class CallGraph:
 
                 edge_set: set[str] = set()
                 for call_name in sub_tree_calls:
-                    resolved = _resolve_name(call_name, module, sym_map, import_map, cg._nodes)
+                    resolved = _resolve_name(
+                        call_name,
+                        module,
+                        sym_map,
+                        import_map,
+                        cg._nodes,
+                        unique_by_unqualified,
+                    )
                     if resolved:
                         edge_set.add(resolved)
 
@@ -238,13 +301,17 @@ class CallGraph:
     # ------------------------------------------------------------------
 
     def call_sites(self, name: str) -> int:
-        """Count how many edges point TO *name* (exact qualname or any *.name suffix)."""
+        """Count how many edges point TO *name* (exact qualname only).
+
+        Edges store fully-resolved qualnames, so an exact match is the correct
+        count. We deliberately do **not** match on the unqualified suffix —
+        doing so would credit calls aimed at a *different* same-named symbol in
+        another module, inflating the count and masking genuinely-dead code.
+        """
         count = 0
-        unqualified = name.split(".")[-1]
-        for src, targets in self._edges.items():
-            for t in targets:
-                if t == name or t.split(".")[-1] == unqualified:
-                    count += 1
+        for targets in self._edges.values():
+            if name in targets:
+                count += 1
         return count
 
     def edges_from(self, qualname: str) -> set[str]:
@@ -267,6 +334,7 @@ class CallGraph:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _iter_calls_from_node(node) -> list[str]:
     """Collect call target names from a single AST node (and its descendants)."""
@@ -295,22 +363,30 @@ def _resolve_name(
     sym_map: dict[str, str],
     import_map: dict[str, str],
     all_nodes: dict[str, tuple],
+    unique_by_unqualified: dict[str, str],
 ) -> Optional[str]:
-    """Try to resolve a bare call name to a fully qualified name."""
+    """Resolve a bare call name to a fully qualified name, or None.
+
+    Resolution is *scoped* — we never credit a call to an arbitrary same-named
+    symbol in another module (that invents false edges and makes genuinely-dead
+    code look alive). Order:
+
+    1. Same-module symbol table.
+    2. Real imported-name map (the name was explicitly imported into this module).
+    3. A project-wide unqualified-name match **only when it is unambiguous**
+       (exactly one symbol anywhere bears that unqualified name). When the name
+       is ambiguous across modules, we record **no edge** rather than guessing.
+    """
     # 1. Same-module symbol
     if name in sym_map:
         return sym_map[name]
 
-    # 2. Imported alias
+    # 2. Imported alias -> the real target it was imported as
     if name in import_map:
         candidate = import_map[name]
         if candidate in all_nodes:
             return candidate
 
-    # 3. Any node whose unqualified name matches
-    # (catches cross-module calls we couldn't fully resolve via imports)
-    for qualname in all_nodes:
-        if qualname.split(".")[-1] == name:
-            return qualname
-
-    return None
+    # 3. Unambiguous project-wide match (one and only one symbol has this name).
+    #    Ambiguous names resolve to None -> no edge.
+    return unique_by_unqualified.get(name)
