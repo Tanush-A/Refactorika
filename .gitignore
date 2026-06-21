@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Benchmark data — fetched on demand, never committed (mixed/GPL licenses upstream)
 eval/external/
 
@@ -15,3 +16,16 @@ venv/
 
 # OS / editor
 .DS_Store
+=======
+.venv/
+.refactorika/
+__pycache__/
+*.pyc
+.env
+demo_repo/.git/
+.claude/worktrees/
+
+# Benchmark data + run artifacts (fetched/generated, never committed)
+eval/external/
+eval/results/
+>>>>>>> c96dee28d47b378d45255520cb4702fd3e74059a
