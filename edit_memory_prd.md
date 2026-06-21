@@ -3,6 +3,8 @@
 
 ---
 
+> **Scope tags:** Core components (§1–§11) are **[Initial]** (committed for v1) unless tagged **[Reach]** (stretch goals; built only if time allows and descoped first). The companion integrations (§12–§13) each carry their own tag.
+
 ## 1. Problem
 
 When refactoring a pre-existing codebase, two things go wrong today:
@@ -16,14 +18,14 @@ Build a tool that:
 - Audits a codebase for a specific convention (e.g. error-handling style) and reports where it's inconsistent.
 - Produces a safe, dependency-aware order to fix it.
 - Guides an agent through the refactor, checking each edit against the target convention and flagging any missed call sites — without dumping the entire repo into context at every step.
-- Creates context files of the code structure for future software developers and agents to easily understand the refactored codebase.
+- Creates context files (structural maps of the refactored codebase) so future developers and agents can understand it without re-deriving the structure (see §5.6).
 
 ## 3. Non-goals (for this build)
 
 - General-purpose convention detection across arbitrary pattern types. Scoped to **one convention type** for v1 (error-handling style, e.g. exceptions vs `Result<T>`/explicit error returns).
 - Full static type-checking or a true "find all usages" engine. Call-site detection will be best-effort (AST/grep-based), not IDE-grade.
 - Multi-language support. Scoped to **TypeScript** for v1.
-- Cross-session/persistent memory across multiple repo lifecycles. Scoped to a single audit-and-refactor pass.
+- Cross-session/persistent memory across multiple repo lifecycles **[Reach]**. Initial v1 is scoped to a single audit-and-refactor pass; the Redis long-term tier (§12) persists only within that run for Initial, with cross-session reuse as a Reach goal.
 
 ## 4. Target user
 
@@ -63,9 +65,15 @@ A developer or team with a legacy or partially-migrated codebase who wants to br
 Automated guardrails layered on top of guided execution. Every proposed edit passes through this pipeline before it is committed:
 1. **Pre-edit gate** — the proposed edit is parsed with `tree-sitter-typescript`; reject if it fails to parse or does not match the confirmed target variant.
 2. **Post-edit type check** — run `tsc --noEmit` (project scope, or single-file scope where configured) on touched files; if it fails, roll the edit back.
-3. **Call-site sweep** — after a successful edit, re-scan the recorded call sites (AST + grep) to confirm none were left in the old convention; surface any stragglers.
-4. **Reject → re-propose loop** — on any gate failure, sursface the failure reason to the agent and let it re-propose, up to a bounded retry count. (This defines the previously-undefined failure path in §5.3.)
+3. **Call-site sweep** — after a successful edit, re-scan the *recorded* call sites (AST + grep) to confirm none were left in the old convention; surface any stragglers. Note: this catches incompletely-converted *known* sites; it cannot find sites the §5.2 detection never recorded (true false negatives), which are addressed only by the ground-truth eval (§7).
+4. **Reject → re-propose loop** — on any gate failure, surface the failure reason to the agent and let it re-propose, up to a bounded retry count. (This defines the previously-undefined failure path in §5.3.)
 5. **Per-edit audit log** — append a structured record (file, checks run, pass/fail, retry count, final diff) to the local JSON store, powering the demo dashboard.
+
+### 5.6 Context File Generation **[Initial]**
+- Input: completed (or in-progress) refactor results + the call-site map from §5.2.
+- Process: emit a structured context file per module/directory (e.g. `.editmemory/context/<module>.md`) summarizing the now-canonical convention, key exported symbols, and their dependents.
+- Output: committed context files that future developers and agents read instead of re-deriving structure — closing the loop on the "Edit Memory" name by persisting the audit's findings as durable, human- and agent-readable artifacts.
+- Note: generated from data the audit/plan already compute, so marginal cost is low.
 
 ## 6. Architecture
 
@@ -76,19 +84,22 @@ Automated guardrails layered on top of guided execution. Every proposed edit pas
 ## 7. Success metrics (for the demo)
 
 - Audit correctly identifies the dominant convention and flags deviating files on a constructed/curated demo repo with known, deliberate inconsistency.
-- Guided execution catches at least one deliberately planted convention violation and one deliberately planted missed call site, live, in the demo.
+- Guided execution catches at least one deliberately planted convention violation and one *planted, ground-truth-known* missed call site, live, in the demo.
+- **Ground-truth eval:** on the curated demo repo (whose true call-site set is known), report call-site detection precision/recall. This is the honest source for any false-negative number — **not** Sentry (§13).
 - **Every committed edit passes the parse + `tsc --noEmit` gate**; no edit is committed in a non-compiling state.
 - **The reject → re-propose loop demonstrably recovers** from a deliberately planted bad edit (rollback + successful re-proposal), live, in the demo.
-- Token usage for audit + refactor stays flat/sub-linear relative to repo size, shown against the realistic agent-loop baseline (§5.4).
+- **Context files (§5.6)** are generated for the refactored modules and accurately reflect the post-refactor convention and key dependents.
+- Token usage for audit + refactor is a fraction of the realistic agent-loop baseline on the demo repo (§5.4). Scaling claims (sub-linear in repo size) require multiple repo sizes to demonstrate and are a **[Reach]** measurement.
 
 ## 8. Demo script
 
 1. Show the demo repo: deliberately inconsistent error handling across ~10-15 files.
 2. Run audit → show report (dominant pattern, deviating files).
 3. Run plan → show ordered task list with call-site counts.
-4. Run guided execution → watch 3-4 files get fixed; live catch of a violation and a missed call site.
+4. Run guided execution → watch 3-4 files get fixed; live catch of a violation and a *planted, ground-truth-known* missed call site.
 5. **Plant a bad edit** → show the pre-edit/typecheck gate reject it, roll back, and the agent recover via the re-propose loop.
 6. Show token-usage chart: Edit Memory vs the realistic agent-loop baseline.
+7. Open a generated context file (§5.6) for a refactored module — show it accurately reflects the new convention and its dependents.
 
 ## 9. Build plan / time estimate (hackathon)
 
@@ -99,8 +110,11 @@ Automated guardrails layered on top of guided execution. Every proposed edit pas
 | Guided execution + consistency checks | 2-3 hrs |
 | Verification harness (parse gate, `tsc` gate, sweep, re-propose loop) | 2-3 hrs |
 | Context efficiency layer + comparison metric | 2-3 hrs |
+| Context file generation (§5.6) **[Initial]** | 1-2 hrs |
+| Redis integration (§12) — storage, Agent Memory, Context Retriever, LangCache **[Initial]** | 3-5 hrs |
 | Demo repo construction + dashboard | 3-5 hrs |
-| **Total** | **18-25 hrs** |
+| **Total (Initial)** | **22-32 hrs** |
+| Sentry integration (§13) — SDK + per-tool spans **[Reach]** | +1-2 hrs |
 
 **Build order:** ship a vertical slice (one file, end-to-end: audit → confirm → plan → check → verify → commit) on a 2-file repo *before* broadening to 10-15 files. This guarantees a demoable artifact even if audit generalization lags.
 
@@ -114,11 +128,12 @@ Automated guardrails layered on top of guided execution. Every proposed edit pas
 ## 11. Future scope (explicitly out of v1)
 
 - Multiple convention types audited simultaneously.
-- Persistent memory across sessions/repo lifecycle.
+- Persistent memory across sessions/repo lifecycle (the Reach upgrade of the Redis long-term tier, §12).
+- Vector-search-based rule retrieval — valuable once many convention types exist; unnecessary for v1's single type (see §12.2).
 - Incorporating human review corrections as a second rule source.
 - Multi-language support.
 
-## 12. Redis Iris Integration (companion note)
+## 12. Redis Iris Integration (companion note) — **[Initial]**
 
 Describes how Redis Iris slots into the existing architecture (§6) **without changing project scope**.
 
@@ -129,23 +144,23 @@ The Redis track judging criteria specifically calls out using Iris for agent mem
 ### 12.2 Component mapping
 
 - **Redis Agent Memory → the rule list**
-  - Long-term memory tier stores inferred conventions as they're extracted during the audit and refactor (cross-session, vector-search backed).
-  - Replaces a flat JSON rule file with something queryable: when checking a new edit, retrieve only the rules semantically relevant to that file/pattern type, instead of loading the entire rule list into context.
+  - Long-term memory tier stores inferred conventions as they're extracted during the audit and refactor. For **Initial**, this persists *within the current run*; **cross-session reuse across repo lifecycles is [Reach]** (consistent with §3/§11).
+  - Replaces a flat JSON rule file with something queryable. Note: v1 has a single convention type, so selective retrieval has limited payoff initially — its value (pulling only the rules relevant to a file) scales with convention count (§11).
   - Session memory tier holds the in-progress refactor task list and execution log for the current run — gives you the ordered event log for free instead of building your own.
 - **Redis Context Retriever → `check_convention` / `get_impact`**
   - Context Retriever's model is typed, chainable tool calls over structured data rather than one-shot vector retrieval — exactly the shape these two MCP tools already need.
   - Define structured lookups (e.g. "all call sites for function X," "current dominant convention for pattern Y") as Context Retriever tools. The agent calls them mid-refactor the same way it would call any other MCP tool, and the retrieval logic doesn't have to be hand-rolled.
 - **Redis LangCache → audit efficiency**
-  - The audit step makes repeated, similar classification calls across files ("does this file use exceptions or `Result<T>`?"). LangCache caches near-duplicate queries, directly reducing redundant LLM calls during the audit pass.
+  - The audit step makes repeated classification calls across files ("does this file use exceptions or `Result<T>`?"). LangCache caches these — keyed on the *normalized AST signature* of the construct, **not** loose semantic similarity, to avoid false cache hits that would corrupt audit accuracy.
   - This becomes a clean, legitimate "Redis beyond caching" story: caching is one piece, not the whole pitch — agent memory and context retrieval do the structural work.
-- **Vector search (underlying both Agent Memory and Context Retriever)**
-  - Used for matching a new edit against the closest relevant prior convention example, rather than exact-string matching against a rule list.
+- **Vector search (underlying both Agent Memory and Context Retriever) — [Reach]**
+  - v1's three fixed, AST-detectable variants are matched *exactly* (more accurate than fuzzy matching here). Semantic vector matching becomes useful only once many convention types exist; it is a Reach capability, not an Initial dependency.
 
 ### 12.3 Architecture note (relative to §6)
 
 - Local JSON storage (as written in §6) becomes the fallback/offline mode.
 - Primary mode for the demo: Redis Cloud instance backing Agent Memory (rules + session log) and Context Retriever (call-site/dependency lookups).
-- MCP server tools (`run_audit`, `get_plan`, `check_convention`, `get_impact`, `record_edit`) call into Redis under the hood instead of reading/writing local JSON.
+- MCP server tools (`run_audit`, `confirm_convention`, `get_plan`, `check_convention`, `get_impact`, `verify_edit`, `run_typecheck`, `record_edit`) call into Redis under the hood instead of reading/writing local JSON.
 
 ### 12.4 Demo addition
 
@@ -157,3 +172,45 @@ Alongside the existing demo script (§8: audit → plan → guided execution →
 ### 12.5 Risk
 
 - Added infra dependency (Redis Cloud setup, account/connection) on top of the existing build risks. Budget setup time early — don't leave Redis provisioning to the last few hours.
+
+## 13. Sentry Integration (companion note) — **[Reach]**
+
+Describes how Sentry AI Agent Monitoring slots into the existing architecture (§6) **without changing project scope**. Read alongside the Redis Iris note (§12).
+
+### 13.1 Why Sentry fits
+
+The Sentry track rewards strong technical execution paired with observability/error monitoring, not just a working demo. Edit Memory runs an agent loop over many MCP tool calls, and Sentry surfaces where those calls *throw, fail, or slow down* live — turning tool-level reliability into a visible signal. (The call-site *false-negative* rate from §10 is measured separately by the §7 ground-truth eval, not by Sentry, which has no ground truth; the two are complementary.)
+
+Sentry also directly supports instrumenting MCP servers (tool executions, prompt retrievals, resource access), which matches Edit Memory's delivery form (§6) without needing custom monitoring code.
+
+### 13.2 Component mapping
+
+- **MCP tool instrumentation → reliability of the core mechanism**
+  - Instrument `check_convention`, `get_impact`, and `record_edit` individually.
+  - Track per-tool *error/exception* rate and latency — surfaces tools that throw or fail. (Note: Sentry **cannot** measure false negatives / silently-missed call sites, since it has no ground truth; that number comes from the §7 ground-truth eval, not Sentry.)
+  - This makes tool-level failures (one component of the §10 call-site risk) a measured, visible number instead of an assumption.
+- **Trace view → demo asset**
+  - A single end-to-end trace covers the audit → plan → guided execution pipeline: model calls, tool executions, and MCP interactions in one view.
+  - Useful on screen during the live demo as a literal trace of what happened during a refactor run, alongside the audit report and token chart already planned.
+- **Token/cost tracking → second source for the efficiency metric**
+  - Sentry's AI monitoring captures token usage and cost per model call automatically.
+  - Gives a second, independently-sourced version of the token-usage comparison in §7 (Edit Memory vs the realistic agent-loop baseline), without building that measurement by hand.
+- **Error tagging/grouping → audit and execution failure patterns**
+  - Automatic grouping of similar failures across runs — useful if the audit step misclassifies a pattern repeatedly in a particular kind of file; surfaces that as a single grouped issue rather than scattered noise.
+
+### 13.3 Architecture note (relative to §6)
+
+- Sentry SDK initialized alongside the MCP server, with tracing enabled (`tracesSampleRate`) and the relevant AI/agent integration for whichever model client is used.
+- MCP tool calls (`check_convention`, `get_impact`, `record_edit`) get wrapped so each shows up as its own span — gives per-tool failure rates, not just an aggregate.
+- Setup is lightweight (SDK init + integration registration) relative to the Redis provisioning work — can be added late without much schedule risk.
+
+### 13.4 Demo addition
+
+Alongside the existing demo script (§8: audit → plan → guided execution → token chart) and the Redis Insight addition (§12.4):
+
+- Show a Sentry trace of one full refactor run: audit call, plan generation, each guided edit, and the consistency checks, as a single connected trace.
+- Show the per-tool dashboard: `check_convention` and `get_impact` *error/exception* rates over the demo run, paired with the §7 ground-truth precision/recall numbers (the actual source for false-negative rate) — together substantiating the PRD's honesty about call-site detection being best-effort rather than IDE-grade.
+
+### 13.5 Risk
+
+- Minimal added risk — this is the lightest of the three integrations (PRD core, Redis, Sentry) to bolt on, and can be the first thing descoped back to "logs only" if time runs short without losing the core pitch.
