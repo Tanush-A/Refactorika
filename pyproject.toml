@@ -26,7 +26,8 @@ dev = [
 ]
 
 [project.scripts]
-refactorika = "refactorika.mcp_server:main"
+refactorika = "refactorika.cli:main"
+refactorika-scan = "refactorika.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["refactorika"]

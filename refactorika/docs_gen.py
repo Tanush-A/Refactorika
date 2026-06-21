@@ -142,12 +142,20 @@ def get_context_map(
 # ---------------------------------------------------------------------------
 
 def _module_name(p: Path) -> str:
-    """Best-effort module name from a file path."""
+    """Best-effort dotted module name from a file path."""
     try:
         rel = p.relative_to(Path.cwd())
+        return str(rel).replace("/", ".").removesuffix(".py")
     except ValueError:
-        rel = p
-    return str(rel).replace("/", ".").removesuffix(".py")
+        pass
+    # File is outside cwd — walk up to find the nearest package root (__init__.py).
+    parts = list(p.parts)
+    for i in range(len(parts) - 1, 0, -1):
+        if not (Path(*parts[:i]) / "__init__.py").exists():
+            # parts[i:] is the package-relative path
+            segment = ".".join(parts[i:]).removesuffix(".py")
+            return segment
+    return p.stem
 
 
 def _extract_purpose(source: str, tree) -> str:
