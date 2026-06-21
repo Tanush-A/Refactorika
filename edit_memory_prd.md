@@ -38,9 +38,12 @@ A developer or team with a legacy or partially-migrated codebase who wants to br
 - Process: parse files with `tree-sitter-typescript`, detect instances of the target convention type, classify each instance into a variant.
 - **What counts as an error-handling instance (TypeScript):**
   - `throw_statement` and `try_statement` / `catch_clause` nodes (exception-style).
-  - Functions whose declared return type is a `Result<T>`-style discriminated union (e.g. `{ ok: true; value: T } | { ok: false; error: E }`, or `neverthrow`-style `Result`/`ResultAsync`).
-  - Functions whose return type is a nullable/sentinel (`T | null`, `T | undefined`) used as the error signal.
-- **Classification:** each instance is bucketed into one of three variants — `exception`, `result-type`, `sentinel` — and attributed to its enclosing function/file.
+  - Functions whose **explicitly-annotated** return type is a `Result<T>`-style discriminated union (e.g. `{ ok: true; value: T } | { ok: false; error: E }`), or a name from a **configurable known-Result-type list** (`neverthrow`'s `Result`/`ResultAsync`, `fp-ts` `Either`, `ts-results`, plus local aliases).
+  - Functions whose **explicitly-annotated** return type is a nullable/sentinel (`T | null`, `T | undefined`) *used as the error signal* — see the sentinel caveat below.
+- **Async unwrapping:** before classifying, unwrap `Promise<X>` (and `async` function returns) so `Promise<Result<T>>` / `Promise<T | null>` are bucketed by their inner type rather than skipped.
+- **Sentinel caveat:** `T | null` is often a legitimate "not found" rather than an error. v1 counts it as the `sentinel` variant only with a corroborating signal (e.g. function name, or a sibling throwing variant); otherwise it is reported separately as *ambiguous* and **not** counted as a deviation, to avoid inflating the inconsistency number.
+- **Classification:** each instance is bucketed into one of three variants — `exception`, `result-type`, `sentinel` — and attributed to its enclosing function/file. **Mixed functions** (e.g. `throw` for programmer errors *and* a `Result` return for expected failures) are labeled `mixed` rather than force-fit into one bucket.
+- **Detection engine (v1):** classification is **tree-sitter-only**, so it is scoped to *syntactically visible* types — **explicitly-annotated** return types and recognized type names. Inferred return types and aliases requiring cross-file resolution are out of scope for v1 (see §10).
 - **Human-confirm step:** the audit *proposes* the dominant convention; the user confirms or overrides it in one step before any plan is generated. This converts the riskiest LLM classification into a cheap confirmation and prevents downstream errors from propagating into the plan/execution.
 - Output: a report — proposed dominant variant (pending confirmation), % adoption, list of deviating files with file:line references.
 
@@ -122,6 +125,7 @@ Automated guardrails layered on top of guided execution. Every proposed edit pas
 
 - **Generalization risk**: convention detection working reliably only on the curated demo repo, not arbitrary code. Mitigated by being explicit in the pitch about current scope (one language, one pattern type).
 - **Call-site accuracy risk**: grep/LLM-based dependency tracking will have false negatives compared to a real IDE. Acceptable for demo if framed honestly.
+- **Inferred/imported-type blind spot**: tree-sitter-only detection (§5.1) sees syntax, not resolved types, so functions with *inferred* return types or `Result` aliases defined in other files are missed or left unclassified. Accepted for v1 and framed honestly; the TypeScript compiler API would close this gap (future scope). The curated demo repo should use explicit annotations so the audit reflects true adoption.
 - **Time risk**: audit step is the most open-ended; should be timeboxed hardest and descoped first if behind schedule.
 - **Harness dependency risk**: the typecheck gate depends on the demo repo having a working `tsconfig.json` and a fast `tsc --noEmit`; large projects may make this slow. Mitigated by single-file-scope checking and keeping the demo repo small. Timebox the `tsc` integration.
 
