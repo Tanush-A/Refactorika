@@ -58,12 +58,12 @@ class InvalidTransitionError(MalformedResponseError):
 class LoopBudgets:
     """Maximum model calls by phase and across the entire run."""
 
-    discovery_calls: int = 3
-    planning_calls: int = 1
-    execution_calls: int = 2
-    repair_calls: int = 2
-    completion_audit_calls: int = 1
-    total_calls: int = 10
+    discovery_calls: int = 6
+    planning_calls: int = 3
+    execution_calls: int = 8
+    repair_calls: int = 4
+    completion_audit_calls: int = 2
+    total_calls: int = 30
     timeout_seconds: float = 900.0
 
     def limit_for(self, state: WorkflowState) -> int | None:
@@ -113,7 +113,9 @@ LoopDriver = Callable[[WorkflowState, LoopContext], LoopAction]
 _ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
     WorkflowState.DISCOVER: frozenset((WorkflowState.DISCOVER, WorkflowState.SELECT)),
     WorkflowState.SELECT: frozenset((WorkflowState.PLAN,)),
-    WorkflowState.PLAN: frozenset((WorkflowState.EXECUTE,)),
+    # PLAN may retry itself when a provider returns a structurally invalid plan.
+    # The retry remains bounded by ``planning_calls`` and ``total_calls``.
+    WorkflowState.PLAN: frozenset((WorkflowState.PLAN, WorkflowState.EXECUTE)),
     WorkflowState.EXECUTE: frozenset((WorkflowState.EXECUTE, WorkflowState.VERIFY)),
     WorkflowState.VERIFY: frozenset(
         (WorkflowState.EXECUTE, WorkflowState.REPAIR, WorkflowState.COMPLETION_AUDIT)

@@ -148,8 +148,8 @@ PATH="$PWD/eval/.venv/bin:$PATH" eval/.venv/bin/python \
   --agentic-model claude-sonnet-4-5-20250929 \
   --agentic-mcp \
   --agentic-mcp-model claude-sonnet-4-5-20250929 \
-  --agentic-max-iter 20 \
-  --agentic-mcp-max-iter 20 \
+  --agentic-max-iter 30 \
+  --agentic-mcp-max-iter 30 \
   --case guard_clause_continue \
   --trials 1
 ```
@@ -169,8 +169,8 @@ wait indefinitely:
 | `--agent-timeout` | 900 seconds | Total wall-clock budget for each optional tool-loop agent |
 | `--shell-timeout` | 30 seconds | Each shell command issued by a loop agent |
 | `--gate-timeout` | 180 seconds | Each Ruff, Pyright, or Pytest gate subprocess |
-| `--agentic-max-iter` | 20 calls | Maximum control-agent model turns |
-| `--agentic-mcp-max-iter` | 20 calls | Maximum harness-agent model turns |
+| `--agentic-max-iter` | 30 calls | Maximum control-agent model turns |
+| `--agentic-mcp-max-iter` | 30 calls | Maximum harness-agent model turns |
 
 For a fast smoke run, reduce the budgets explicitly:
 

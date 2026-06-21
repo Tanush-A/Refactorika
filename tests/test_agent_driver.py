@@ -126,6 +126,178 @@ def test_shared_driver_runs_tools_patch_and_structured_workflow(tmp_path: Path) 
     ]
 
 
+def test_invalid_structured_plan_gets_one_bounded_retry(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("def old():\n    return 1\n")
+    provider = ScriptedProvider(
+        [
+            [use("workflow_action", {"next_state": "select"}, 1)],
+            [use("workflow_action", {"next_state": "execute", "plan": {}}, 2)],
+            [use("workflow_action", {"next_state": "execute", "plan": plan()}, 3)],
+            [
+                use(
+                    "submit_patch",
+                    {
+                        "edits": {"app.py": "def format_name():\n    return 1\n"},
+                        "refactor_kind": "rename",
+                        "plan_step": "step-1",
+                    },
+                    4,
+                )
+            ],
+        ]
+    )
+    driver = SharedAgentDriver(
+        provider,
+        PassingGateTools(tmp_path),
+        arm="agentic+harness",
+        case="plan-retry",
+        trial=0,
+        user_prompt="refactor this codebase",
+        harness_context={},
+    )
+
+    result = AgentLoop(driver).run()
+
+    assert result.termination_reason is TerminationReason.COMPLETED
+    assert result.model_calls == 4
+    assert result.metadata["planning_schema_retries"] == 1
+    assert result.metadata["phase_calls"]["plan"] == 2
+    assert "Validation error" in provider_message_text(driver.messages)
+
+
+def test_missing_workflow_action_during_plan_gets_bounded_retry(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            [use("workflow_action", {"next_state": "select"}, 1)],
+            [{"type": "text", "text": "I need to provide the plan."}],
+            [use("workflow_action", {"next_state": "execute", "plan": plan()}, 3)],
+            [
+                use(
+                    "submit_patch",
+                    {
+                        "edits": {"app.py": "VALUE = 2\n"},
+                        "refactor_kind": "simplify",
+                        "plan_step": "step-1",
+                    },
+                    4,
+                )
+            ],
+        ]
+    )
+    (tmp_path / "app.py").write_text("VALUE = 1\n")
+    result = AgentLoop(
+        SharedAgentDriver(
+            provider,
+            PassingGateTools(tmp_path),
+            arm="agentic",
+            case="missing-plan-action",
+            trial=0,
+            user_prompt="refactor this codebase",
+        )
+    ).run()
+
+    assert result.termination_reason is TerminationReason.COMPLETED
+    assert result.metadata["planning_schema_retries"] == 1
+
+
+def test_combined_selection_and_plan_is_normalized_through_required_states(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n")
+    provider = ScriptedProvider(
+        [
+            [use("workflow_action", {"next_state": "plan", "plan": plan()}, 1)],
+            [
+                use(
+                    "submit_patch",
+                    {
+                        "edits": {"app.py": "VALUE = 2\n"},
+                        "refactor_kind": "simplify",
+                        "plan_step": "step-1",
+                    },
+                    2,
+                )
+            ],
+        ]
+    )
+    result = AgentLoop(
+        SharedAgentDriver(
+            provider,
+            PassingGateTools(tmp_path),
+            arm="agentic+harness",
+            case="combined-select-plan",
+            trial=0,
+            user_prompt="refactor this codebase",
+            harness_context={},
+        )
+    ).run()
+
+    assert result.termination_reason is TerminationReason.COMPLETED
+    assert result.model_calls == 2
+    assert result.metadata["visited_states"][:4] == [
+        "discover",
+        "select",
+        "plan",
+        "execute",
+    ]
+
+
+def test_invalid_multifile_plan_step_is_returned_for_model_repair(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n")
+    (tmp_path / "caller.py").write_text("from app import VALUE\n")
+    provider = ScriptedProvider(
+        [
+            [use("workflow_action", {"next_state": "select"}, 1)],
+            [use("workflow_action", {"next_state": "execute", "plan": plan()}, 2)],
+            [
+                use(
+                    "submit_patch",
+                    {
+                        "edits": {"caller.py": "from app import RENAMED\n"},
+                        "refactor_kind": "rename",
+                        "plan_step": "step-1",
+                    },
+                    3,
+                )
+            ],
+            [
+                use(
+                    "submit_patch",
+                    {
+                        "edits": {"app.py": "RENAMED = 1\n"},
+                        "refactor_kind": "rename",
+                        "plan_step": "step-1",
+                    },
+                    4,
+                )
+            ],
+        ]
+    )
+    result = AgentLoop(
+        SharedAgentDriver(
+            provider,
+            PassingGateTools(tmp_path),
+            arm="agentic",
+            case="multifile-step-repair",
+            trial=0,
+            user_prompt="refactor this codebase",
+        )
+    ).run()
+
+    assert result.termination_reason is TerminationReason.COMPLETED
+    patch_events = [event for event in result.tool_events if event.tool == "submit_patch"]
+    assert [event.status for event in patch_events] == ["error", "ok"]
+    assert patch_events[0].error_class == "InvalidPlanStep"
+
+
+def provider_message_text(messages: list[dict[str, Any]]) -> str:
+    return "\n".join(
+        content
+        for message in messages
+        if isinstance((content := message.get("content")), str)
+    )
+
+
 def test_tool_contract_contains_standard_patch_shape_and_is_defensive() -> None:
     first = developer_tool_schemas()
     second = developer_tool_schemas()
@@ -139,6 +311,10 @@ def test_tool_contract_contains_standard_patch_shape_and_is_defensive() -> None:
     }
     first[0]["name"] = "mutated"
     assert second[0]["name"] == "list_files"
+    workflow = next(tool for tool in second if tool["name"] == "workflow_action")
+    plan_schema = workflow["input_schema"]["properties"]["plan"]
+    assert "objective" in plan_schema["required"]
+    assert plan_schema["properties"]["steps"]["minItems"] == 1
 
 
 def test_harness_context_is_injected_without_changing_tool_schemas(tmp_path: Path) -> None:

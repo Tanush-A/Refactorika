@@ -187,9 +187,23 @@ class DeveloperTools:
         return self.search_code(rf"\b{symbol}\b")
 
     def git_status(self) -> ToolResult:
+        if not (self.repo / ".git").exists():
+            return self._result(
+                time.monotonic(),
+                status="ok",
+                data="",
+                metadata={"git_repository": False, "benchmark_baseline_clean": True},
+            )
         return self._run(("git", "status", "--short"))
 
     def git_diff(self, *, staged: bool = False) -> ToolResult:
+        if not (self.repo / ".git").exists():
+            return self._result(
+                time.monotonic(),
+                status="ok",
+                data="",
+                metadata={"git_repository": False, "benchmark_baseline_clean": True},
+            )
         command = ["git", "diff", "--no-ext-diff"]
         if staged:
             command.append("--cached")

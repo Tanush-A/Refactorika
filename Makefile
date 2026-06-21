@@ -50,9 +50,9 @@ benchmark-full-agent:  ## Run independent harness OFF-vs-ON full-system agents
 		--gate-timeout "$${GATE_TIMEOUT:-180}" \
 		--parallel-fallback-delay "$${PARALLEL_FALLBACK_DELAY:-2}" \
 		--agentic-model "$${AGENTIC_MODEL:-$${MODEL:-claude-sonnet-4-5-20250929}}" \
-		--agentic-max-iter "$${AGENTIC_MAX_ITER:-20}" \
+		--agentic-max-iter "$${AGENTIC_MAX_ITER:-30}" \
 		--agentic-mcp-model "$${AGENTIC_MCP_MODEL:-$${MODEL:-claude-sonnet-4-5-20250929}}" \
-		--agentic-mcp-max-iter "$${AGENTIC_MCP_MAX_ITER:-20}" \
+		--agentic-mcp-max-iter "$${AGENTIC_MCP_MAX_ITER:-30}" \
 		--input-cost-per-mtok "$${INPUT_COST_PER_MTOK:-0}" \
 		--output-cost-per-mtok "$${OUTPUT_COST_PER_MTOK:-0}" \
 		--cache-read-cost-per-mtok "$${CACHE_READ_COST_PER_MTOK:-0}" \
