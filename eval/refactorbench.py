@@ -148,6 +148,50 @@ def classify(instruction: str) -> Scope:
     return Scope(False, "other", {}, "no matching in-scope transform")
 
 
+_LLM_CLASSIFY_SYSTEM = (
+    "You map a single refactoring instruction to ONE transform from a fixed menu, or decline. "
+    "The only applicable transform is a reference-correct SYMBOL rename (a function/class/"
+    "constant renamed to a new identifier, repo-wide). File/module renames, moves, signature "
+    "changes, encapsulation, and combining functions are NOT supported — decline those. "
+    "Return ONLY JSON."
+)
+
+
+def _llm_classify_prompt(instruction: str) -> str:
+    return (
+        'Return JSON: {"in_scope": bool, "kind": "rename"|"none", "old": "<identifier>", '
+        '"new": "<identifier>", "reason": "<short>"}. Set in_scope true ONLY for a single '
+        "symbol (function/class/constant) rename where you can name the exact old and new "
+        f"identifiers.\n\nInstruction:\n{instruction}"
+    )
+
+
+def llm_classify(instruction: str, client) -> Optional[Scope]:
+    """Ask the provider to map an instruction to a rename spec, or None to keep the decline.
+
+    Provider-agnostic (Claude or Ollama via Goal 1), cached for reproducibility. Used only when
+    the deterministic regex couldn't place the task, so it can recover renames phrased unusually.
+    """
+    resp = client.complete_json(_LLM_CLASSIFY_SYSTEM, _llm_classify_prompt(instruction))
+    if not resp or not resp.get("in_scope") or resp.get("kind") != "rename":
+        return None
+    old, new = resp.get("old"), resp.get("new")
+    if not (isinstance(old, str) and isinstance(new, str) and old.isidentifier()
+            and new.isidentifier()):
+        return None
+    return Scope(True, "rename", {"old": old, "new": new},
+                 f"LLM-mapped rename: {resp.get('reason', '')}")
+
+
+def classify_task(instruction: str, client=None) -> Scope:
+    """Deterministic regex first (offline, precise); LLM fallback only when a client is given."""
+    scope = classify(instruction)
+    if scope.in_scope or client is None:
+        return scope
+    llm = llm_classify(instruction, client)
+    return llm if llm is not None else scope
+
+
 # ------------------------------------------------------------------------- execution
 def _count_subtests(test_path: Path) -> int:
     return len(re.findall(r"def\s+test_\w+", test_path.read_text()))
@@ -212,10 +256,10 @@ def _run_ast_test(work: Path, task: Task) -> tuple[int, int]:
     return max(0, total - fails - errs), total
 
 
-def run_task(task: Task, rb_dir: Path, memory=None) -> TaskResult:
+def run_task(task: Task, rb_dir: Path, memory=None, client=None) -> TaskResult:
     """Classify, (if in scope) apply the rename through the engine, run the AST test."""
     t0 = time.time()
-    scope = classify(task.instruction)
+    scope = classify_task(task.instruction, client=client)
     total = _count_subtests(task.test_path)
     if not scope.in_scope:
         return TaskResult(task, scope, "declined", 0, total, time.time() - t0)
@@ -258,6 +302,8 @@ class Summary:
     level: str
     memory_on: bool
     results: list[TaskResult] = field(default_factory=list)
+    model: str = "deterministic (regex NL->spec)"
+    usage: dict = field(default_factory=lambda: {"input": 0, "output": 0, "calls": 0})
 
     def to_dict(self) -> dict:
         in_scope = [r for r in self.results if r.scope.in_scope]
@@ -269,6 +315,8 @@ class Summary:
         return {
             "level": self.level,
             "memory_on": self.memory_on,
+            "model": self.model,
+            "llm_usage": self.usage,
             "totals": {
                 "all_tasks": len(self.results),
                 "in_scope": len(in_scope),
@@ -285,24 +333,35 @@ class Summary:
 
 
 def run_eval(rb_dir: Path, level: str, *, only_in_scope: bool = False,
-             smoke: bool = False, limit: Optional[int] = None, memory_on: bool = False) -> Summary:
+             smoke: bool = False, limit: Optional[int] = None, memory_on: bool = False,
+             use_llm: bool = False) -> Summary:
     tasks = load_tasks(rb_dir, level)
+    client = _make_client() if use_llm else None
     if only_in_scope or smoke:
-        tasks = [t for t in tasks if classify(t.instruction).in_scope]
+        tasks = [t for t in tasks if classify_task(t.instruction, client=client).in_scope]
     if smoke:
         tasks = tasks[:5]
     if limit:
         tasks = tasks[:limit]
 
     memory = _make_memory() if memory_on else None
-    summary = Summary(level=level, memory_on=memory_on)
+    model = client.model if client is not None else "deterministic (regex NL->spec)"
+    summary = Summary(level=level, memory_on=memory_on, model=model)
     for t in tasks:
-        r = run_task(t, rb_dir, memory=memory)
+        r = run_task(t, rb_dir, memory=memory, client=client)
         summary.results.append(r)
         mark = "PASS" if r.task_pass else ("decl" if r.status == "declined" else "----")
         print(f"  [{mark}] {r.task.repo.replace('_refactor',''):8} {r.task.name:40} "
               f"{r.passed}/{r.total}  ({r.status})")
+    if client is not None:
+        summary.usage = client.total_usage
     return summary
+
+
+def _make_client():
+    from refactorika.llm.client import LLMClient
+
+    return LLMClient()
 
 
 def _make_memory():
@@ -321,8 +380,12 @@ def write_results(summary: Summary, out_dir: Path, tag: str) -> None:
 
 
 def _markdown(d: dict) -> str:
+    u = d.get("llm_usage", {})
     lines = [
         f"# RefactorBench results — level={d['level']}, memory={'on' if d['memory_on'] else 'off'}",
+        "",
+        f"NL→spec: **{d.get('model', 'deterministic')}**  ·  LLM calls: {u.get('calls', 0)}  ·  "
+        f"tokens: {u.get('input', 0)} in / {u.get('output', 0)} out",
         "",
         f"- **In-scope pass rate:** {d['in_scope_pass_rate']:.1%} "
         f"({d['in_scope_passes']}/{d['totals']['in_scope']} in-scope tasks)",

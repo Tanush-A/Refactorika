@@ -31,6 +31,8 @@ class LLMClient:
         self.stub = stub or {}
         self.replay_only = replay_only
         self._cache = self._load_cache()
+        # Accumulated token usage across *live* calls (cache/stub hits cost nothing).
+        self.total_usage: dict = {"input": 0, "output": 0, "calls": 0}
 
     # ------------------------------------------------------------------ public
     def available(self) -> bool:
@@ -54,6 +56,10 @@ class LLMClient:
         raw = self.provider.complete(
             [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
         )
+        usage = getattr(self.provider, "last_usage", {}) or {}
+        self.total_usage["input"] += usage.get("input", 0)
+        self.total_usage["output"] += usage.get("output", 0)
+        self.total_usage["calls"] += 1
         if raw is None:
             return None
         parsed = _extract_json(raw)

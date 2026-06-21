@@ -119,28 +119,39 @@ for any edge the impact-scoped subset or the graph might miss.
 
 ## 8. Redis as the shared brain (not a cache)
 
-Redis Iris (with a mandatory local-JSON fallback) holds live decision state, not just
-cached results:
+Redis Iris is the **live store** (via `REDIS_URL`, e.g. Redis Cloud `rediss://…`), with a
+mandatory local-JSON fallback for offline/CI (forced by `REFACTORIKA_OFFLINE=1`; an explicit
+but unreachable `REDIS_URL` warns rather than silently degrading). It holds live decision
+state, not cached results:
 
 - **Graph + order** — the symbol graph and its leaf-to-root order are queryable state.
-- **Decision memory** — every judgment the LLM makes is recorded as a `RefactorDecision`
-  keyed by the *structural shape* of the code. Before decomposing a function, the planner
-  **recalls** how an identical shape was handled before and **reuses the same helper names**.
-  That recall is what keeps the 2nd, 5th, Nth similar function consistent — the engine
-  remembers its own conventions instead of re-deciding per file. (`memory/agent_memory.py`)
-- **Vectors** — per-function embeddings for duplicate detection and similar-refactor
-  exemplars (reused from v2; optional `[semantic]` extra).
+- **Decision memory** — every judgment is recorded as a `RefactorDecision` and indexed by an
+  **embedding of the code it acted on** (RediSearch vector index + agent-memory hashes). Before
+  decomposing a function, the planner recalls the most **semantically similar** prior decision
+  (exact structural match first, then vector similarity) and **reuses the same helper names** —
+  so near-duplicates, not just identical functions, stay consistent. (`memory/decision_memory.py`)
+  Inspect it with `refactorika <dir> --show-memory`; `docker-compose.yml` runs a local
+  redis-stack (+ optional `agent-memory-server`).
+- **Vectors** — per-function embeddings for duplicate detection and similar-refactor exemplars.
 
 Kill Redis and everything degrades to `.refactorika/` files with identical results — the
 engine never *depends* on it.
 
-## 9. The LLM layer
+## 9. The LLM layer (provider-agnostic)
 
-`llm/client.py` wraps Anthropic with a **record/replay cache** (keyed by model+system+
-prompt) so runs are reproducible and re-runs are free, plus a **stub seam** so tests and
-demos run fully offline. With no API key and no cache hit, `complete_json` returns `None`
-and the planner falls back to the deterministic plan — **the engine never depends on the
-model being reachable**. Temperature is 0; the model returns structured specs, never diffs.
+Generation and embeddings are **separate, swappable providers** (`llm/providers.py`), since
+Anthropic has no embeddings API and the embedding backend must work regardless of the
+generation provider. Selected by env:
+
+- **Generation:** `REFACTORIKA_LLM_PROVIDER` = `anthropic` (Claude, default) | `ollama` (local).
+- **Embeddings:** `REFACTORIKA_EMBED_PROVIDER` = `local` (all-MiniLM-L6-v2, default) | `ollama`.
+
+`llm/client.py` wraps the chosen generation provider with a **record/replay cache** keyed by
+*(provider, model, prompt)* — so a recorded run replays identically under Claude or Ollama, for
+reproducible demos and eval — plus a **stub seam** for fully-offline tests. With no provider
+reachable and no cache/stub hit, `complete_json` returns `None` and the planner falls back to
+the deterministic plan: **the engine never depends on a model being reachable**. Temperature 0;
+the model returns structured specs, never diffs.
 
 ## 10. Front doors
 
@@ -167,7 +178,18 @@ model being reachable**. Temperature is 0; the model returns structured specs, n
 - **LLM + memory** (`test_llm_planner.py`): decomposition flows through the gates and
   commits; **two identical-shape functions get the same helper names** via decision recall.
 
-## 12. Deferred (honest roadmap)
+## 12. Evaluation — RefactorBench
+
+The engine is evaluated on [RefactorBench](https://github.com/microsoft/RefactorBench) (100
+real multi-file tasks across nine OSS repos, AST-verified). The adapter (`eval/refactorbench.py`)
+classifies each instruction, **declines out-of-scope tasks explicitly**, applies in-scope renames
+reference-correctly through the parse gate, and verifies with the task's own AST test. We report
+three honest numbers, never one. Base-level results (in `eval/results/`): **54.5% in-scope pass
+(6/11), 90.9% subtask completion (80/88), 89/100 declined**. The memory ON/OFF ablation is
+identical on this rename subset (targets are dictated by the instruction) — reported as such.
+Full detail and how-to: [11-benchmarks-and-eval.md](11-benchmarks-and-eval.md).
+
+## 13. Deferred (honest roadmap)
 
 Characterization/golden-master tests for the strong behavior proof; incremental graph
 updates (today the graph is rebuilt per item — correct, but O(repo) each step); a fully

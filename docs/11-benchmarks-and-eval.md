@@ -74,12 +74,22 @@ Results are written to `eval/results/<level>_<scope>_mem<on|off>.{json,md}` (com
 our reported numbers). The fetched repos under `eval/external/` are **not** committed (mixed
 licenses incl. GPLv3 Ansible, ~53MB).
 
-## Provider-agnostic & reproducible
+## Provider-agnostic NL→spec & reproducibility
 
-The NL→spec mapping is deterministic for the rename subset (no key needed for the in-scope run).
-When an LLM is used for classification of ambiguous instructions, it runs through the
-provider-agnostic harness (Claude or Ollama) with the record/replay cache, so a reported run is
-reproducible. The model used is recorded with the results.
+Mapping a natural-language instruction to a `TransformSpec` works two ways:
+
+- **Deterministic (default, no key):** a regex maps "rename X to Y" forms directly — covers the
+  in-scope rename subset offline.
+- **LLM fallback (`--llm`):** for instructions the regex can't place, the provider (Claude or
+  Ollama, via the Goal-1 harness) is asked to map the instruction to a rename spec or decline.
+  It runs through the record/replay cache (keyed by provider+model+prompt) so a reported run is
+  reproducible, and the **model used + token cost** are recorded in the results (`model`,
+  `llm_usage`). The engine never fabricates an edit: a non-rename instruction is declined.
+
+```bash
+make eval-inscope                      # deterministic NL->spec (offline)
+.venv/bin/python eval/run_eval.py --in-scope --llm   # LLM-assisted NL->spec (needs a provider)
+```
 
 ## Deferred / future
 

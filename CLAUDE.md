@@ -42,9 +42,23 @@ commit`; any red/crash → restore every file byte-for-byte. The **full suite** 
   before callee, else undefined name), then **cascade** reachability to a fixpoint.
 
 ## Redis = decision memory, not a cache (the differentiator)
-Every LLM judgment is a `RefactorDecision` keyed by the code's **structural shape**. Before
-decomposing, the planner **recalls** how an identical shape was handled and **reuses the helper
-names** — so the 2nd/5th/Nth similar function stays consistent. (`memory/agent_memory.py`)
+Every LLM judgment is a `RefactorDecision` indexed by an **embedding of the code it acted on**.
+Before decomposing, the planner **recalls the most semantically similar** prior decision (exact
+shape first, then vector similarity) and **reuses the helper names** — so near-duplicates stay
+consistent. Live store = Redis (`REDIS_URL`); JSON fallback for offline (`REFACTORIKA_OFFLINE=1`).
+Inspect: `refactorika <dir> --show-memory`. (`memory/decision_memory.py`)
+
+## Providers (provider-agnostic harness)
+Generation (`llm/providers.py`: Anthropic | Ollama) and embeddings (local MiniLM | Ollama) are
+SEPARATE — Anthropic has no embeddings API. Select via `REFACTORIKA_LLM_PROVIDER` /
+`REFACTORIKA_EMBED_PROVIDER`. The record/replay cache (`llm/client.py`) is keyed by
+*(provider, model, prompt)* so any provider is reproducible. Engine never depends on a model
+being reachable (degrades to deterministic plan).
+
+## Eval — RefactorBench (`eval/refactorbench.py`)
+Runs the engine on 100 real OSS tasks; classifies + **declines out-of-scope** explicitly.
+Reports three honest numbers. Base: 54.5% in-scope pass (6/11), 90.9% subtask completion,
+89/100 declined. `make eval-smoke|eval-inscope|eval-ablation|eval-all`. Results in `eval/results/`.
 
 ## Commands
 ```bash

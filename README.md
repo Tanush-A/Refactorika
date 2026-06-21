@@ -57,6 +57,19 @@ python3 -m venv .venv
 .venv/bin/python -m refactorika.mcp_server   # stdio MCP; tools: build_graph, get_plan, run_pipeline, get_log
 ```
 
+## Providers, memory, and evaluation
+
+- **Provider-agnostic LLM** — generation via Claude or local **Ollama**, embeddings via local
+  MiniLM or Ollama (separate, since Anthropic has no embeddings API). Selected by env
+  (`REFACTORIKA_LLM_PROVIDER`, `REFACTORIKA_EMBED_PROVIDER`); a record/replay cache makes any
+  provider reproducible. See `.env.example`.
+- **Redis as the shared brain** — decisions are stored in Redis (`REDIS_URL`, e.g. Redis Cloud)
+  and recalled by semantic similarity so refactors stay consistent; local-JSON fallback for
+  offline (`REFACTORIKA_OFFLINE=1`). Inspect with `refactorika <dir> --show-memory`;
+  `docker compose up -d redis` runs a local instance.
+- **RefactorBench eval** — `make fetch && make eval-inscope` runs the engine on real OSS
+  refactoring tasks; results in `eval/results/`. See `docs/11-benchmarks-and-eval.md`.
+
 ## How it works
 
 ```

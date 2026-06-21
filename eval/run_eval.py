@@ -40,6 +40,8 @@ def main() -> int:
     ap.add_argument("--in-scope", action="store_true", help="all in-scope tasks")
     ap.add_argument("--all", action="store_true", help="every task (out-of-scope declined)")
     ap.add_argument("--ablation", action="store_true", help="run in-scope twice: memory ON vs OFF")
+    ap.add_argument("--llm", action="store_true",
+                    help="use the provider (Claude/Ollama) for NL->spec on unparsed tasks")
     ap.add_argument("--limit", type=int, default=None)
     args = ap.parse_args()
 
@@ -55,9 +57,14 @@ def main() -> int:
     for memory_on in runs:
         print(f"\n>>> Running ({'memory ON' if memory_on else 'memory OFF'}) ...")
         summary = rb.run_eval(args.rb_dir, args.level, only_in_scope=only_in_scope,
-                              smoke=smoke, limit=args.limit, memory_on=memory_on)
+                              smoke=smoke, limit=args.limit, memory_on=memory_on,
+                              use_llm=args.llm)
         d = summary.to_dict()
         _print_summary(d)
+        if args.llm:
+            u = d["llm_usage"]
+            print(f"  NL->spec model: {d['model']}  ·  LLM calls: {u['calls']}  ·  "
+                  f"tokens: {u['input']} in / {u['output']} out")
         scope_tag = "inscope" if only_in_scope else "all"
         tag = f"{args.level}_{scope_tag}_mem{'on' if memory_on else 'off'}"
         rb.write_results(summary, RESULTS_DIR, tag)

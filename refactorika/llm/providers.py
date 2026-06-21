@@ -52,6 +52,8 @@ class GenerationProvider(ABC):
 
     def __init__(self, model: str):
         self.model = model
+        # Token usage from the most recent live call: {"input": int, "output": int}.
+        self.last_usage: dict = {"input": 0, "output": 0}
 
     @abstractmethod
     def complete(self, messages: list[dict], **opts) -> Optional[str]:
@@ -89,6 +91,10 @@ class AnthropicProvider(GenerationProvider):
                 system=system,
                 messages=turns,
             )
+            usage = getattr(msg, "usage", None)
+            if usage is not None:
+                self.last_usage = {"input": getattr(usage, "input_tokens", 0),
+                                   "output": getattr(usage, "output_tokens", 0)}
             return "".join(b.text for b in msg.content if b.type == "text")
         except Exception:
             return None
@@ -110,6 +116,8 @@ class OllamaProvider(GenerationProvider):
         }
         try:
             data = _http_post_json(f"{self.base_url}/api/chat", payload)
+            self.last_usage = {"input": data.get("prompt_eval_count", 0),
+                               "output": data.get("eval_count", 0)}
             return (data.get("message") or {}).get("content")
         except Exception:
             return None
