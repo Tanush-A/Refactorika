@@ -23,6 +23,7 @@ from refactorika.graph.model import Graph
 from refactorika.graph.order import impact_of, topo_order
 from refactorika.llm.client import LLMClient
 from refactorika.memory.agent_memory import AgentMemory
+from refactorika.memory.decision_memory import DecisionMemory
 from refactorika.pipeline.planner import deterministic_plan
 
 _MIN_GOD_LINES = 12  # functions at/over this many lines are decomposition candidates
@@ -33,11 +34,15 @@ _SYSTEM = (
 )
 
 
-def make_llm_planner(client: Optional[LLMClient] = None, memory: Optional[AgentMemory] = None):
+def make_llm_planner(
+    client: Optional[LLMClient] = None,
+    memory: Optional[AgentMemory] = None,
+    decisions: Optional[DecisionMemory] = None,
+):
     """Return a planner(graph, root) closure that adds LLM judgment to the base plan."""
 
     def _plan(graph: Graph, root: Optional[str] = None) -> Worklist:
-        return llm_plan(graph, root=root, client=client, memory=memory)
+        return llm_plan(graph, root=root, client=client, memory=memory, decisions=decisions)
 
     return _plan
 
@@ -48,12 +53,16 @@ def llm_plan(
     root: Optional[str],
     client: Optional[LLMClient] = None,
     memory: Optional[AgentMemory] = None,
+    decisions: Optional[DecisionMemory] = None,
 ) -> Worklist:
     base = deterministic_plan(graph, root)
     if root is None:
         return base
     client = client or LLMClient()
     memory = memory or AgentMemory(Storage())
+    # Decision memory layers semantic recall over the agent memory (exact shape stays the
+    # fast path). Reuse the caller's agent memory so its store/backend is shared.
+    dm = decisions or DecisionMemory(memory._storage, agent_memory=memory)
     if not client.available():
         return base
 
@@ -63,14 +72,15 @@ def llm_plan(
 
     for qual, source in _god_functions(graph, root):
         pattern = _shape_pattern(source)
-        prior = memory.get_decision(pattern)
+        prior = dm.recall(source, pattern)
         prompt = _decompose_prompt(source, prior)
         resp = client.complete_json(_SYSTEM, prompt)
         if not resp or not resp.get("new_source"):
             continue
         rationale = resp.get("rationale", "decompose god function into named helpers")
         if prior:
-            rationale += " (consistent with prior decision for this shape)"
+            how = (dm.last_match or {}).get("how", "prior")
+            rationale += f" (consistent with prior decision, recalled by {how})"
         extra.append(PlanItem(
             spec=TransformSpec(
                 kind="decompose_function", target=qual,
@@ -79,10 +89,10 @@ def llm_plan(
             order_index=pos.get(qual, 0),
             impact=sorted(impact_of(graph, qual)),
         ))
-        memory.put_decision(RefactorDecision(
+        dm.record(RefactorDecision(
             pattern=pattern, transform_kind="decompose_function", target=qual,
             choice={"helper_names": resp.get("helper_names", [])},
-        ))
+        ), source)
 
     items = base.items + extra
     items.sort(key=lambda it: it.order_index)

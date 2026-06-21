@@ -39,6 +39,8 @@ def _entry(
     apply: bool = typer.Option(False, "--apply", help="Write changes in place and commit."),
     show_graph: bool = typer.Option(False, "--show-graph", help="Print the symbol graph and exit."),
     show_plan: bool = typer.Option(False, "--show-plan", help="Print the plan and exit."),
+    show_memory: bool = typer.Option(False, "--show-memory",
+                                     help="Print stored refactor decisions (from Redis) and exit."),
     no_tests: bool = typer.Option(False, "--no-tests", help="Skip the test gates (faster)."),
     use_llm: bool = typer.Option(False, "--llm", help="Use the LLM planner (needs API key)."),
     rename: list[str] = typer.Option(
@@ -52,6 +54,9 @@ def _entry(
         return
     if show_plan:
         _print_plan(path, use_llm, renames)
+        return
+    if show_memory:
+        _print_memory()
         return
     _run(path, apply=apply, run_tests=not no_tests, use_llm=use_llm, renames=renames)
 
@@ -155,6 +160,23 @@ def _print_plan(path: str, use_llm: bool, renames=None) -> None:
         typer.echo(f"  [{it.order_index:>3}] {s.kind:18} {s.target}")
         if s.rationale:
             typer.echo(f"        {_DIM}{s.rationale}{_RESET}")
+    typer.echo("")
+
+
+def _print_memory() -> None:
+    from refactorika.memory.decision_memory import DecisionMemory
+
+    storage = Storage()
+    dm = DecisionMemory(storage)
+    decisions = dm.all_decisions()
+    typer.echo(f"\n{_BOLD}Decision memory{_RESET}  ·  store={storage.backend}  ·  "
+               f"semantic={'on' if dm.semantic else 'off'}  ·  {len(decisions)} record(s)")
+    for d in decisions:
+        helpers = ", ".join(d.choice.get("helper_names", [])) or "—"
+        typer.echo(f"  {d.transform_kind:20} {d.target:36} helpers=[{helpers}]")
+        typer.echo(f"      {_DIM}shape={d.pattern}{_RESET}")
+    if not decisions:
+        typer.echo(f"  {_DIM}(none yet — run with --llm to record decisions){_RESET}")
     typer.echo("")
 
 
