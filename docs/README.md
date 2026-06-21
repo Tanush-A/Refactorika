@@ -1,6 +1,6 @@
 # Refactorika — Docs
 
-PRD broken out by topic, sourced from `../edit_memory_prd.md`.
+The master spec, broken out by topic. (Project memory / quick context lives in `../CLAUDE.md`.)
 
 1. [Problem, Solution & Purpose](01-problem-and-purpose.md)
 2. [Target User & Scope](02-target-user.md)

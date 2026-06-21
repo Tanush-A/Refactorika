@@ -5,7 +5,7 @@
 - **Generalization risk** — convention detection working reliably only on the curated demo repo, not arbitrary code. Mitigated by being explicit in the pitch about current scope (one language, one pattern type).
 - **Call-site accuracy risk** — grep/LLM-based dependency tracking will have false negatives compared to a real IDE. Acceptable for demo if framed honestly.
 - **Time risk** — audit step is the most open-ended; should be timeboxed hardest and descoped first if behind schedule.
-- **Harness dependency risk** — the typecheck gate ([05a-verification-harness.md](05a-verification-harness.md)) depends on the demo repo having a working `tsconfig.json` and a fast `tsc --noEmit`; large projects may make this slow. Mitigated by single-file-scope checking and keeping the demo repo small. Timebox the `tsc` integration.
+- **Harness dependency risk** — the typecheck gate ([05a-verification-harness.md](05a-verification-harness.md)) depends on the demo repo having a working `pyrightconfig.json` / `pyproject.toml` and a fast `pyright` run; large projects may make this slow. Mitigated by single-file-scope checking and keeping the demo repo small. Timebox the `pyright` integration.
 
 ## Future scope (explicitly out of v1)
 
@@ -19,10 +19,10 @@
 
 | Component | Estimate |
 |---|---|
-| Convention audit (TypeScript, error-handling) + human-confirm step | 4-6 hrs |
+| Convention audit (Python, error-handling) + human-confirm step | 4-6 hrs |
 | Refactor plan / call-site detection (AST + grep) | 3-5 hrs |
 | Guided execution + consistency checks | 2-3 hrs |
-| Verification harness (parse gate, `tsc` gate, sweep, re-propose loop) | 2-3 hrs |
+| Verification harness (parse gate, `pyright` gate, sweep, re-propose loop) | 2-3 hrs |
 | Context efficiency layer + comparison metric | 2-3 hrs |
 | Context file generation | 1-2 hrs |
 | Redis integration — storage, Agent Memory, Context Retriever, LangCache **[Initial]** | 3-5 hrs |

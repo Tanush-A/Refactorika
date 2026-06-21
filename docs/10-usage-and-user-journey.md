@@ -25,7 +25,7 @@ $ editmemory plan
 ```
 $ editmemory run
 ```
-- Walks the plan file-by-file. Internally calls an LLM to propose each edit, then runs it through the verification harness (parse gate → `tsc --noEmit` → call-site sweep) before committing. Prints a running log: file, checks passed/failed, retries, diff.
+- Walks the plan file-by-file. Internally calls an LLM to propose each edit, then runs it through the verification harness (parse gate → `ruff` → `pyright` → `pytest` → call-site sweep) before committing. Prints a running log: file, checks passed/failed, retries, diff.
 - On a gate failure, retries up to a bounded count automatically; if still failing, skips the file and flags it for manual review rather than blocking the whole run.
 
 ```
@@ -50,7 +50,7 @@ The behavior is identical to Flow 1 — same audit, same plan, same gates — th
 
 This only stays cheap if the core logic lives in one library and both interfaces are thin shells over it:
 
-- **One core module** exposes the operations (`runAudit`, `confirmConvention`, `getPlan`, `checkConvention`, `getImpact`, `verifyEdit`, `runTypecheck`, `recordEdit`, `generateContextFiles`) as plain functions/classes with no CLI- or MCP-specific code mixed in.
+- **One core module** exposes the operations (`run_audit`, `confirm_convention`, `get_plan`, `check_convention`, `get_impact`, `verify_edit`, `run_typecheck`, `record_edit`, `generate_context_files`) as plain functions/classes with no CLI- or MCP-specific code mixed in.
 - **The CLI** is a thin layer that parses argv, calls the core functions directly in-process, and formats output as terminal text — it does *not* need its own LLM-calling loop for edit proposals; it can still shell out to a model for the "propose an edit" step, but the verification/gating code is identical to what MCP uses.
 - **The MCP server** is an equally thin layer that exposes the same core functions as MCP tools, with the *agent* (not Refactorika) responsible for proposing edits — Refactorika just verifies them.
 - Storage (local JSON or Redis — see [06-redis-integration.md](06-redis-integration.md)) is read/written by the core module, so both interfaces see the same audit/plan/log state regardless of which one is driving.

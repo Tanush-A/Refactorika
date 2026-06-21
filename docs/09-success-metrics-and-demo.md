@@ -5,7 +5,7 @@
 - Audit correctly identifies the dominant convention and flags deviating files on a constructed/curated demo repo with known, deliberate inconsistency.
 - Guided execution catches at least one deliberately planted convention violation and one *planted, ground-truth-known* missed call site, live, in the demo.
 - **Ground-truth eval:** on the curated demo repo (whose true call-site set is known), report call-site detection precision/recall. This is the honest source for any false-negative number — **not** Sentry (see [07-sentry-integration.md](07-sentry-integration.md)).
-- **Every committed edit passes the parse + `tsc --noEmit` gate**; no edit is committed in a non-compiling state.
+- **Every committed edit passes the parse + `pyright` gate**; no edit is committed in a type-error state.
 - **The reject → re-propose loop demonstrably recovers** from a deliberately planted bad edit (rollback + successful re-proposal), live, in the demo.
 - **Context files** are generated for the refactored modules and accurately reflect the post-refactor convention and key dependents (see [05-core-components.md](05-core-components.md) §5.6).
 - Token usage for audit + refactor is a fraction of the realistic agent-loop baseline on the demo repo. Scaling claims (sub-linear in repo size) require multiple repo sizes to demonstrate and are a **[Reach]** measurement.
