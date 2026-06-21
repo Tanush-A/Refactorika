@@ -22,6 +22,61 @@ Everything is one of two classes: **advisory** (read-only — finds and explains
 
 ---
 
+## 0.1 Architecture at a glance
+
+```
+        ┌──────────────────────────────────────────────────────────────────────┐
+        │                       CLAUDE  (reasoning agent)                        │
+        │     reads results · decides what to change · proposes file contents     │
+        └───────▲───────────────────────────────────────────────────┬──────────┘
+   advisory     │ results (ranked smells, dup pairs, dead symbols,    │ tool calls
+   feeds        │          context)                                   │ (MCP / stdio)
+   reasoning    │                                                     ▼
+        ┌───────┴─────────────────────────────────────────────────────────────────┐
+        │                  MCP SHELL  ·  refactorika/mcp_server.py                  │
+        │   FastMCP — thin 1:1 wrappers, JSON in/out                                │
+        │                                                                           │
+        │   ADVISORY (read-only)                       VERIFIED MUTATION (gated)     │
+        │   analyze_file   find_duplicates             apply_and_verify              │
+        │   find_dead_code get_context_map  get_log    apply_and_verify_multi        │
+        └───────┬───────────────────────────────────────────────┬──────────────────┘
+                │                                                │
+                ▼                                                ▼
+   ┌──────────────────────────────────────┐   ┌───────────────────────────────────────┐
+   │   ANALYSIS  (read-only, refactorika/  │   │   GATE STACK   core/apply.py + gates.py │
+   │   analysis/ + core/analyze.py)        │   │   atomic: snapshot → … → commit/rollback│
+   │                                       │   │                                         │
+   │  parser.py     shared tree-sitter     │   │   1 parse    (tree-sitter)              │
+   │  analyze.py    smells + ranking       │   │   2 lint     (ruff, new-violations)     │
+   │  duplicates.py fingerprint + semantic │   │   3 type     (pyright)                  │
+   │  call_graph.py symbol graph           │   │   4 behavior (pytest)  ◄── proves safe  │
+   │  dead_code.py  reachability + conf.   │   │   → git commit  /  restore + reason     │
+   │  embeddings.py [semantic] extra       │   │   → EditRecord {checks, status, files…} │
+   │  docs_gen.py   context extraction     │   └─────────────────┬───────────────────────┘
+   └──────────────────┬───────────────────┘                     │ write history
+                      │ read/write                              │
+                      ▼                                          ▼
+   ┌───────────────────────────────────────────────────────────────────────────────────┐
+   │                    REDIS IRIS  (memory)   ·   core/storage.py + memory/             │
+   │                                                                                     │
+   │   ① AST cache        ② Vector index       ③ Agent memory      ④ Context retriever   │
+   │   (skip re-parse)    {file}:{fn}→vec       cross-session       structured + vector   │
+   │   exact-key hash     cosine / RediSearch   ctx + history       relevant prior ctx    │
+   │   storage.cache_*    memory/vector_index   memory/agent_memory memory/context        │
+   │                                                                                     │
+   │   ────────────────── local fallback (offline, mandatory) ──────────────────────     │
+   │        .refactorika/state.json   ·   .refactorika/context/<module>.md               │
+   └───────────────────────────────────────────────────────────────────────────────────┘
+
+   Loop:  analyze/find_* ──▶ Claude proposes ──▶ apply_and_verify ──▶ commit │ rollback+reason
+                ▲                                                                  │
+                └───────────────── re-propose on rollback ◄────────────────────────┘
+```
+
+**Read it as three bands.** The MCP shell exposes two tool classes; **advisory** tools run through the read-only **analysis** layer, **mutations** run through the atomic **gate stack**. Both sit on **Redis Iris**, which is primary but always degrades to local files so the harness runs offline. Claude is outside the harness — it consumes advisory results and proposes the edits the gate stack then proves.
+
+---
+
 ## 1. The foundation new code plugs into (shipped — do not rebreak)
 
 - **`core/schema.py`** — frozen contracts: `Opportunity`, `AnalysisResult`, `GateChecks`, `EditRecord`, `REFACTOR_KINDS`, `Status`. All have `to_dict()`. New result types extend this file in the same style.
