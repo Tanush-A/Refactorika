@@ -12,3 +12,4 @@ PRD broken out by topic, sourced from `../edit_memory_prd.md`.
 7. [Sentry Integration (Reach)](07-sentry-integration.md)
 8. [Risks & Future Scope](08-risks-and-scope.md)
 9. [Success Metrics & Demo Script](09-success-metrics-and-demo.md)
+10. [Usage & User Journey](10-usage-and-user-journey.md)
