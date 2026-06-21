@@ -1,7 +1,8 @@
-"""State: edit log + analysis cache. Redis when reachable, local JSON otherwise.
+"""State: edit log + analysis cache. Redis by default, local JSON fallback.
 
-The fallback is mandatory — the demo must run offline. Redis is an optimization,
-never a dependency.
+Redis is the primary backend (`REDIS_URL`, or localhost when unset). The JSON
+fallback is mandatory — if Redis is unreachable the demo must still run offline.
+Redis is an optimization, never a hard dependency.
 """
 
 from __future__ import annotations
@@ -14,26 +15,49 @@ from typing import Optional
 _LOG_KEY = "refactorika:log"
 _CACHE_KEY = "refactorika:cache"
 
+# Tried when neither the constructor nor REDIS_URL specifies one. Pass
+# redis_url=None explicitly to force the JSON backend (used by tests).
+_DEFAULT_REDIS_URL = "redis://localhost:6379/0"
+_UNSET = object()
+
+
+def _load_dotenv(path: str = ".env") -> None:
+    """Populate os.environ from a .env file (KEY=VALUE), never overriding what's already set."""
+    p = Path(path)
+    if not p.exists():
+        return
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
+
 
 class Storage:
-    def __init__(self, redis_url: Optional[str] = None, json_path: Optional[Path] = None):
+    def __init__(self, redis_url=_UNSET, json_path: Optional[Path] = None):
+        _load_dotenv()
+        if redis_url is _UNSET:  # not specified -> env, then localhost default
+            redis_url = os.environ.get("REDIS_URL", _DEFAULT_REDIS_URL)
         self.json_path = Path(
             json_path or os.environ.get("REFACTORIKA_STATE", ".refactorika/state.json")
         )
-        self._redis = self._connect(redis_url or os.environ.get("REDIS_URL"))
+        self._redis = self._connect(redis_url)
         self.backend = "redis" if self._redis else "json"
 
     def _connect(self, url: Optional[str]):
-        if not url:
+        if not url:  # explicit None/"" -> JSON backend
             return None
         try:
             import redis  # noqa: PLC0415
 
-            client = redis.Redis.from_url(url, decode_responses=True)
+            client = redis.Redis.from_url(
+                url, decode_responses=True, socket_connect_timeout=0.5
+            )
             client.ping()
             return client
         except Exception:
-            return None  # any failure -> JSON fallback
+            return None  # unreachable / not installed -> fast JSON fallback
 
     # --- JSON fallback helpers -------------------------------------------------
     def _read_json(self) -> dict:
