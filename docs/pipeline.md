@@ -1,164 +1,269 @@
-# Refactorika pipeline (as built)
+# Refactorika pipeline & code-reachability map (as built)
 
-How a run of `refactorika <dir>` actually moves through the codebase, file by file.
-Source of truth for this doc is the code under `refactorika/`; if it disagrees with
-`docs/v3_spec.md`, trust the code.
+How a run actually moves through the codebase, what every module is for, and **which code is
+reachable vs. dead** after the `main` ⇄ `v3-refactoring-engine` merge fused two architectures.
+Source of truth is the code under `refactorika/`; if this disagrees with `docs/v3_spec.md`,
+trust the code. The reachability claims here are reproducible:
 
-## End-to-end flow
-
-```
-graph.resolver.build_graph        (Jedi: real name binding -> symbol graph)
-        |
-graph.order.topo_order / reachable_from   (Tarjan SCC -> leaf-to-root order, dead-code reach)
-        |
-pipeline.planner.deterministic_plan       (dead-code removal + cleanup, ordered)
-        + pipeline.planner_llm.llm_plan   (optional: god-function decomposition, layered on top)
-        |
-pipeline.orchestrator.run_pipeline        (the loop: rebuild graph -> dispatch -> verify -> next)
-        |
-transforms.base.dispatch -> {rename, cleanup, remove_dead_code, node_replace}   (pure: EditMap)
-        |
-pipeline.checker.Checker.verify_apply     (parse -> ruff -> pyright -> pytest(impact-scoped))
-        |
-   commit (git)  <—— all green
-   revert (byte-for-byte restore)  <—— any gate red or crash
-        |
-cascade dead-code to fixpoint, then run_full_suite as the authoritative finale
+```bash
+.venv/bin/python scripts/audit_reachability.py   # module-level import reachability from each entry surface
 ```
 
-## 1. Build the graph — `graph/resolver.py` (`build_graph`)
+---
 
-Not a regex call-graph (that's the old, abandoned `analysis/call_graph.py`). Uses
-**Jedi** for real static name resolution:
+## 0. High-level overview
 
-- Pass 1: every `.py` file becomes a `jedi.Script`; module-owned function/class
-  definitions become `Symbol` nodes (`graph/model.py`), keyed by module-qualified name
-  (`orders.compute_total`, `billing.Invoice.total`).
-- Entry points are flagged textually: public top-level symbols, names in `__all__`,
-  names called inside `if __name__ == "__main__"`, anything in a test file or named
-  `test_*`, and symbols decorated with route/command/fixture/task-style decorators.
-- Pass 2: every reference (`n.goto(follow_imports=True)`) is resolved to the symbol it
-  actually points to — handles imports, aliases, `self`/method dispatch — and recorded
-  as a directed edge `src -> dst` meaning "src references dst" (dst is a dependency).
-- Module-level `import` edges are tracked separately so they don't pollute impact
-  analysis with every top-level constant reference.
+The repo is **one verified spine with three execution surfaces** layered on top. The merge
+brought main's *agentic / analysis* design alongside the branch's *graph-driven engine*; they
+now coexist and partly overlap.
 
-Result: a `Graph` (`symbols`, `edges`, `import_edges`, `entry_points`) that can be
-serialized to/from dict for Redis persistence.
+```
+                         ENTRY POINTS (the "top")
+        refactorika CLI                         MCP server (python -m refactorika.mcp_server)
+        (refactorika/cli.py)                    (refactorika/mcp_server.py)
+              │                                          │
+   ┌──────────┼───────────────┐              ┌───────────┼──────────────────┐
+   │          │               │              │           │                  │
+ (default)  --agents      --show-*        run_pipeline  run_agents     analysis tools
+   │          │                              │           │             analyze_file / find_duplicates
+   ▼          ▼                              ▼           ▼             find_dead_code / generate_docs …
+SURFACE A   SURFACE C                     SURFACE A   SURFACE C        SURFACE B
+THE ENGINE  THE AGENT CAMPAIGN            (engine)    (agents)        ANALYSIS / MCP TOOLS
+pipeline/   agents/ + analysis/audit                                  analysis/ + core/analyze
+   │          │                                                          + core/apply + docs_gen
+   │          │ ComplexityAgent ─► deterministic engine (decompose)      │
+   │          │ DeadCode/Import  ─► transforms/{dead,imports} (legacy)    │
+   └────┬─────┘                                                          │
+        ▼                                                                ▼
+   transforms/* (pure EditMap) ─────────► THE VERIFIED SPINE ◄── core/apply.py (legacy single path)
+                                          pipeline/checker.py
+                                          parse → ruff → pyright → pytest(impact-scoped)
+                                          → git commit (green) / byte-for-byte revert (red)
+                                                  │
+                                          core/storage.py  ── Redis (primary) | JSON (fallback)
+                                          memory/* (decision memory, vectors, codebase index)
+```
 
-## 2. Order the work — `graph/order.py`
+- **Surface A — the engine** (`pipeline/orchestrator.run_pipeline`): graph-driven, deterministic
+  + optional LLM decomposition, leaf-to-root, impact-scoped. The newest, most-tested path.
+- **Surface B — analysis / MCP tools**: main's read-only analyzers (`analyze_file`,
+  `find_duplicates`, `find_dead_code`, `generate_docs`, `get_context_map`) plus the single-file
+  `apply_and_verify`. Exposed over MCP; **not** used by `run_pipeline`.
+- **Surface C — the agent campaign** (`agents/orchestrator`): audit → dependency-ordered plan →
+  specialist agents. Only `ComplexityAgent` is wired through the verified engine; the others
+  still use main's legacy transform + `core/apply` path. See `--agents` / the `run_agents` tool.
 
-Three traversals, all over the same graph:
+All three commit through git and persist state to Redis (or the JSON fallback).
 
-- **`topo_order`** — Tarjan SCC condensation (handles mutual recursion as a unit) then
-  a leaf-first emission: if A references B, B comes before A. This is the refactor
-  order — build on already-verified dependencies. Cycles are reported as groups, not
-  silently broken.
-- **`impact_of(graph, q)`** — reverse reachability: every symbol that transitively
-  depends on `q`. This becomes the re-verification scope after editing `q` — the
-  source of the "impact-scoped tests" efficiency win.
-- **`reachable_from(graph, roots)`** — forward reachability from entry points. Anything
-  outside this set is a dead-code candidate.
+---
 
-## 3. Plan — `pipeline/planner.py` + `pipeline/planner_llm.py`
+## 1. Entry points (the "top")
 
-Both planners return the same contract: a `Worklist` of `PlanItem(spec, order_index,
-impact)`, so a deterministic plan and an LLM-augmented plan are interchangeable.
+| Entry | Defined | Reaches |
+|---|---|---|
+| `refactorika <dir>` (console script) | `pyproject` → `refactorika.cli:main` | Surface A by default; Surface C via `--agents`; read-only views via `--show-graph/--show-plan/--show-memory/--show-similar` |
+| `refactorika-scan` | alias → same `cli:main` | identical |
+| `python -m refactorika.mcp_server` | `refactorika.mcp_server` | Surfaces A (`run_pipeline`, `build_graph`, `get_plan`), B (analysis tools), C (`run_agents`) |
+| `eval/*.py`, `scripts/*.py` | run directly | the eval harness + Sentry/observability (see §7) |
+| `pytest tests/` | — | everything, plus a few modules nothing else reaches (see §7) |
 
-- **`deterministic_plan`** (always available, no LLM):
-  1. Dead-code removal — private symbols unreachable from any entry point
-     (`reachable_from`). Ordered **root-to-leaf** (reverse of refactor order) so a
-     still-present dead caller is removed before the dead callee it references —
-     otherwise you'd delete a symbol something else still names.
-  2. Per-module cleanup (unused imports, autoflake/ruff simplification) — ordered last,
-     after every dead-code removal.
-- **`llm_plan`** (`planner_llm.py`) layers judgment on top of the deterministic plan:
-  - Finds "god functions" (top-level, ≥12 lines) as decomposition candidates.
-  - For each, computes a **structural fingerprint** (`canonical_type_stream` over the
-    AST, hashed) and asks `DecisionMemory.recall` whether a structurally-identical or
-    semantically-similar function was decomposed before.
-  - If a prior decision exists, the prompt instructs the LLM to **reuse the same helper
-    names** — this is what keeps the 2nd, 5th, Nth similar function consistent instead
-    of re-deciding per file.
-  - Calls the LLM (`llm/client.py`, temp 0, record/replay cache) for the actual split;
-    appends a `decompose_function` `PlanItem`; records the new decision back into
-    memory.
-  - If no LLM is reachable (`client.available()` is false), returns the deterministic
-    plan unchanged — the engine never depends on the model.
-  - `renames_first_planner` is a third planner variant: explicit, provably-complete
-    renames (via `rope`, repo-wide) run before everything else in the base plan.
+---
 
-## 4. Orchestrate — `pipeline/orchestrator.py` (`run_pipeline`)
+## 2. Reachability audit — is all the code used?
 
-The plain loop:
+Module-level result (`scripts/audit_reachability.py`, 56 modules total):
 
-1. Copy the repo to a temp dir unless `--apply` (dry-run never touches the real tree);
-   ensure it's a git repo so per-edit commits work.
-2. Run the **full test suite as baseline** — must start green, or "we kept it green" at
-   the end is meaningless.
-3. Build the graph once, get a `Worklist` from the chosen planner.
-4. For each `PlanItem`, **rebuild the graph** (positions/qualnames shift after the
-   previous edit) before dispatching — writes are single-threaded by construction, one
-   item at a time.
-5. `transforms.base.dispatch(spec, root, graph)` produces an `EditMap`; skip if the
-   target symbol is already gone (removed by an earlier cascade/item) or no edits come
-   back.
-6. Map the item's `impact` set to pytest node ids (`impacted_test_node_ids`) and hand
-   the `EditMap` to the `Checker`.
-7. After the worklist, **cascade dead-code removal to a fixpoint** (`_cascade_dead_code`,
-   max 25 rounds): removing one private dead symbol can orphan a helper, which orphans
-   a constant — keep removing (one per round, against a fresh graph) until reachability
-   stabilizes.
-8. Run the **full suite again as the finale** — the authoritative "all N still pass"
-   number, not just the impact-scoped subset used per-edit.
+| Class | Count | Meaning |
+|---|---|---|
+| **Product-reachable** (CLI + MCP) | 43 | imported transitively from a real front door |
+| **Eval/scripts-only** | 3 | `dashboard.py`, `observability.py`, `harness.py` — used by the eval harness / Sentry scripts, **not** by the product |
+| **Test-only** | 2 | `analysis/related.py` (+ the `llm/__init__` marker) — reachable only from a test |
+| **Orphaned** | `transforms/move.py` + 7 empty `__init__.py` | nothing imports `move.py`; the `__init__` files are package markers (loaded implicitly, not dead) |
 
-## 5. Transform engines — `transforms/` (pure, never write to disk)
+**Headline:** almost everything is reachable, but there are **four real "not fully used" spots**
+(details + recommendations in §7): `transforms/move.py` (dead), `analysis/related.py`
+(product-dead, test-only), `DuplicateAgent` (no-op stub), and the Sentry/observability +
+dashboard code (wired only to eval/scripts, not the product — see the Sentry thread).
 
-All take a `TransformSpec` and return an `EditMap` (`{abs_path: new_contents}`); `{}`
-means no-op. Routed by `transforms/base.py:dispatch`:
+> Caveat: this is *module-level*. A module being reachable means it's imported, not that every
+> function in it is called. Known function-level dead spots are listed in §7.
+
+---
+
+## 3. Surface A — the engine pipeline (`pipeline/orchestrator.run_pipeline`)
+
+### 3.1 Build the graph — `graph/resolver.py` (`build_graph`)
+Uses **Jedi** for real static name resolution (this *replaced* the old
+`analysis/call_graph.py` heuristic for the engine — though `call_graph.py` is still alive in the
+analysis layer, see §4):
+- Pass 1: every `.py` → a `jedi.Script`; module-owned function/class defs become `Symbol` nodes
+  (`graph/model.py`), keyed by module-qualified name (`orders.compute_total`).
+- Entry points flagged textually: public top-level symbols, `__all__`, names called under
+  `if __name__ == "__main__"`, test files / `test_*`, and route/command/fixture/task decorators.
+- Pass 2: every reference (`n.goto(follow_imports=True)`) resolves to the symbol it points to →
+  directed edge `src → dst` ("src depends on dst"). Module-level `import` edges tracked
+  separately so they don't pollute impact analysis.
+
+Result: a `Graph` (`symbols`, `edges`, `import_edges`, `entry_points`), dict-serializable for
+Redis.
+
+### 3.2 Order the work — `graph/order.py`
+- **`topo_order`** — Tarjan SCC condensation then leaf-first emission (build on verified deps);
+  cycles reported as groups.
+- **`impact_of(graph, q)`** — reverse reachability: everything that transitively depends on `q`.
+  This is the per-edit re-verification scope (the "impact-scoped tests" win).
+- **`reachable_from(graph, roots)`** — forward reachability from entry points; the complement is
+  the dead-code candidate set.
+
+### 3.3 Plan — `pipeline/planner.py` + `pipeline/planner_llm.py`
+Both return a `Worklist` of `PlanItem(spec, order_index, impact)`, so they're interchangeable.
+- **`deterministic_plan`** (no LLM): dead-code removal of private symbols unreachable from any
+  entry point, ordered **root-to-leaf**; then per-module `cleanup`, ordered last.
+- **`llm_plan`** layers judgment on top:
+  - Finds **god functions** — note the detector is a **three-axis union**, not a line count:
+    cyclomatic complexity ≥ 6 **or** length ≥ 30 lines **or** control-flow nesting ≥ 4
+    (`_is_god_function`, using `radon` + `analysis/parser.max_nesting_depth`).
+  - Computes a structural fingerprint (`canonical_type_stream`, hashed), asks
+    `DecisionMemory.recall` for a prior decision, and **reuses helper names** when one exists.
+  - The per-function decision lives in **`decompose_item`** — the single source of truth shared
+    by this planner *and* the `ComplexityAgent` (§5), so engine and agent decide identically.
+  - No LLM reachable → returns the deterministic plan unchanged.
+- `renames_first_planner` runs explicit `rope` renames before the base plan.
+
+### 3.4 Orchestrate — `pipeline/orchestrator.py` (`run_pipeline`)
+1. Copy repo to a temp dir unless `--apply`; ensure it's a git repo.
+2. **Full suite as baseline** — must start green.
+3. Build graph once; get a `Worklist`.
+4. Per item: **rebuild the graph** (positions shift after each edit; writes are single-threaded),
+   `dispatch(spec, root, graph)` → `EditMap`, skip if target gone / no edits.
+5. Map `impact` → pytest node ids (`impacted_test_node_ids`), hand the `EditMap` to the `Checker`.
+6. **Cascade dead-code to a fixpoint** (`_cascade_dead_code`, ≤25 rounds).
+7. **Full suite as finale** — the authoritative "all N still pass".
+
+### 3.5 Transform engines — `transforms/` (pure; return `EditMap`, never write)
+Routed by `transforms/base.py:dispatch`:
 
 | kind | engine | tool |
 |---|---|---|
-| `rename` | `rename.py` | `rope` — cross-file, reference-correct |
+| `rename` | `rename.py` | `rope`, cross-file |
 | `cleanup` | `cleanup.py` | `autoflake` + `ruff` |
 | `remove_dead_code` | `dead_code.py` | LibCST removal |
-| `decompose_function` / `extract` / `inline` / `change_signature` / `move` | `node_replace.py` | LibCST function-body replacement (v1: all land as a local rewrite) |
+| `decompose_function` / `extract` / `inline` / `change_signature` / `move` | `node_replace.py` | LibCST function-body replacement |
 
-## 6. Verify and commit/revert — `pipeline/checker.py` (`Checker.verify_apply`)
+> ⚠️ Every kind in that last row routes to `node_replace` — including `move`. The separate
+> **`transforms/move.py` is never imported** (see §7).
 
-Per edit, **cheapest-first, short-circuit**:
+---
 
-1. **Parse** every proposed file's contents (tree-sitter) *before* touching disk —
-   reject malformed output for free.
-2. Snapshot originals, write the edits to disk.
-3. **Lint** (`ruff`) — only *new* violations vs. a pre-edit baseline count as failure.
-4. **Type** (`pyright`) — only *new* errors vs. a pre-edit baseline count.
-5. **Behavior** (`pytest`) — **impact-scoped**: only test node ids reachable from the
-   changed symbol's `impact` set run, not the whole suite.
-6. Any gate red, or any exception during the gate stack: restore every touched file
-   byte-for-byte from the snapshot, mark `rolled-back` with a `failure_reason`.
-7. All green: `git add` + `git commit -m "refactor(<kind>): <files>"`, mark `committed`.
-8. Either way, append the structured `EditRecord` to storage
-   (`{file, refactor_kind, checks, retries, status, failure_reason, diff}`) — this is
-   the per-edit log that powers the demo/dashboard.
+## 4. Surface B — analysis / MCP tools (main's read-only layer)
 
-Tools are the arbiter here — no LLM decides whether an edit is safe.
+Exposed as MCP tools in `mcp_server.py`; **not** reached by `run_pipeline`. Backed by the
+**`analysis/call_graph.py`** heuristic call graph (still alive here even though the engine
+replaced it with Jedi):
 
-## 7. Memory — `memory/decision_memory.py` + `memory/agent_memory.py`
+| MCP tool | backing module |
+|---|---|
+| `analyze_file` | `core/analyze.py` |
+| `find_duplicates` | `analysis/duplicates.py` (+ `memory/vector_index` for tier-2 semantic) |
+| `find_dead_code` | `analysis/dead_code.py` → `analysis/call_graph.py` |
+| `generate_docs` / `get_context_map` | `docs_gen.py` + `memory/context.py` |
+| `apply_and_verify` / `apply_and_verify_multi` | `core/apply.py` (single verified-apply path; full-suite tests, graph-blind) |
+| `audit_repo`-style planning | `analysis/audit.py` → `Plan` (also feeds Surface C) |
 
-Not a cache — a record of *judgment calls*. Each `RefactorDecision` (pattern ->
-transform kind -> chosen helper names) is stored keyed by an embedding of the code it
-acted on. `recall()` checks exact structural-shape match first (cheap), then semantic
-similarity via the vector index (`memory/vector_index.py`) above a 0.86 cosine
-threshold. Backed by Redis live, local JSON offline (`REFACTORIKA_OFFLINE=1`) — recall
-degrades to "no match found," never to an error.
+`analysis/related.py` (`find_related`) belongs here conceptually but **its MCP tool was dropped**
+in the branch server, so nothing in the product calls it (§7).
 
-## Two front doors, one engine
+---
 
-- CLI (`refactorika/cli.py`, primary): `refactorika <dir>`, `--show-graph`,
-  `--show-plan`, `--apply`, `--llm`, `--show-memory`.
-- MCP server (`refactorika/mcp_server.py`, secondary): same engine exposed as tools for
-  Claude to drive inline.
+## 5. Surface C — the agent campaign (`agents/orchestrator`)
 
-Both call into the same `pipeline/orchestrator.run_pipeline` — there is exactly one
-engine, not two implementations to keep in sync.
+`--agents` (CLI) and `run_agents` (MCP) call **`run_campaign`**: `analysis/audit.build_plan`
+(audit → dependency-ordered `Plan`) → auto-confirm → **`dispatch_plan`**.
+
+`dispatch_plan` builds the graph + one shared `Checker` from `plan.repo`, then for each task
+(serialized; graph rebuilt before each) routes to a specialist by dominant `kind` and calls
+`agent.handle(task, storage, graph=graph, checker=checker)`:
+
+| agent | path | does real work? |
+|---|---|---|
+| **`ComplexityAgent`** | **verified engine**: `propose_specs` → `decompose_item` (LLM) → `dispatch` (`node_replace`) → `Checker.verify_apply` (impact-scoped) | ✅ when an LLM key is set; else a no-op |
+| `DeadCodeAgent` | legacy text path: `analysis/dead_code` + `transforms/dead.py` → `core/apply` (full suite) | ✅ deterministic |
+| `ImportAgent` | legacy text path: `transforms/imports.py` → `core/apply` | ✅ deterministic |
+| `DuplicateAgent` | `propose()` returns the file unchanged | ❌ **no-op stub** |
+
+`agents/base.SpecialistAgent.handle` is the seam: given `graph` + `checker` it takes the verified
+engine path (via `propose_specs`); otherwise it falls back to `propose` → `core/apply`. Only
+`ComplexityAgent` overrides `propose_specs` today, so the integration is **incremental**.
+
+---
+
+## 6. The shared verified spine, contracts, memory, storage
+
+### 6.1 Verify & commit/revert — `pipeline/checker.py` (`Checker.verify_apply`)
+Per edit, cheapest-first, short-circuit: **parse** (tree-sitter, before disk) → snapshot + write
+→ **lint** (`ruff`, new violations only vs. baseline) → **type** (`pyright`, new errors only) →
+**behavior** (`pytest`, impact-scoped node ids). All green → `git commit`; any red/crash →
+byte-for-byte restore. Either way an `EditRecord` is appended to storage. Tools are the arbiter —
+no LLM decides safety. (Surface B's `core/apply.py` is a parallel, older verified-apply that runs
+the **full** suite and is graph-blind — see §7.)
+
+### 6.2 Contracts — `core/schema.py`
+`TransformSpec` (kind + target + params), `EditMap` (`{abs_path: contents}`), `EditRecord`,
+`GateChecks`, `Plan`/`PlanTask`/`Opportunity` (Surface B/C), `Worklist`/`PlanItem` (Surface A),
+`TRANSFORM_KINDS`. The frozen interface every surface shares.
+
+### 6.3 Memory — `memory/decision_memory.py` + `agent_memory.py` (+ `vector_index.py`, `codebase_index.py`)
+Not a cache — a record of judgment. Each `RefactorDecision` (pattern → kind → chosen helper
+names) is stored keyed by an embedding of the code it acted on. `recall()` checks exact
+structural-shape match first, then semantic similarity via the vector index above a **0.86**
+cosine threshold. `codebase_index.py` embeds every symbol into a namespaced Redis vector space to
+feed the decompose prompt real neighbor context (`--show-similar`).
+
+### 6.4 Storage — `core/storage.py`
+Redis primary (`REDIS_URL`, default `localhost:6379`), JSON fallback. Holds the edit log,
+analysis cache, current plan, decision hash, and (via the vector index) the embeddings. Vector
+search needs RediSearch (redis-stack); on plain Redis it degrades to brute-force JSON.
+
+---
+
+## 7. Dead / not-wired code & post-merge duplication
+
+### 7.1 Genuinely dead — safe to remove
+- **`transforms/move.py`** — zero importers; `dispatch` routes `"move"` to `node_replace`. Pure
+  dead code. *Recommend: delete* (the `move` kind keeps working via `node_replace`).
+
+### 7.2 Product-dead — alive only for a test
+- **`analysis/related.py`** (`find_related`) — imported only by `tests/test_related.py`. The
+  branch MCP server dropped the `find_related` tool, so no front door reaches it. *Recommend:
+  re-expose it as an MCP tool, or remove it + its test.*
+
+### 7.3 Wired but does nothing
+- **`DuplicateAgent.propose`** returns the file unchanged — a `consolidate_duplicate` campaign
+  task is a no-op today (the deterministic consolidate engine is deferred). *Recommend: convert
+  to `propose_specs` once a consolidate engine exists, or mark explicitly unsupported.*
+
+### 7.4 Reachable only from eval/scripts (not the product)
+- **`observability.py`** (Sentry) — `init_sentry` is called only by `dashboard.py` and the eval
+  benchmark scripts. **The CLI and MCP server never initialize Sentry**, and nothing loads
+  `.env` on that path, so product runs send nothing. (main's MCP `main()` *did* call
+  `init_sentry("mcp")`; the merge kept the branch server, which dropped it.)
+- **`dashboard.py`** — no CLI/MCP entry point; reachable only via `scripts/`.
+- **`harness.py`** — main's eval harness; used by `eval/*`.
+
+These are "used" (by eval/scripts) but **not wired into the product**. *Recommend: if Sentry
+should cover real runs, add `init_sentry(...)` + a `.env` load to the CLI/MCP `main()`.*
+
+### 7.5 Post-merge duplication (two-of-everything — tech debt, all reachable)
+The merge left parallel implementations that should converge:
+
+| Concern | Engine (Surface A) | Legacy (Surface B/C) |
+|---|---|---|
+| verified apply | `pipeline/checker.py` (impact-scoped, graph-aware) | `core/apply.py` (full suite, graph-blind) |
+| dead-code removal | `transforms/dead_code.py` (LibCST) | `transforms/dead.py` (agent path) |
+| orchestration | `pipeline/orchestrator.py` | `agents/orchestrator.py` |
+| planning | `pipeline/planner.py` (graph) | `analysis/audit.py` (audit) |
+| dead-code analysis | `graph/order.reachable_from` (Jedi) | `analysis/dead_code.py` → `call_graph.py` |
+
+The end-state is to migrate the agents fully onto the engine spine (route every specialist
+through `propose_specs` → `dispatch` → `Checker`), after which the legacy column can retire.
+`ComplexityAgent` is the first step done.

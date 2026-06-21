@@ -24,9 +24,12 @@ test suite proves behavior is preserved.
 
 ## Quickstart
 
+> **Full how-to (every flag, the MCP tools, the agent campaign, Redis, eval): [`docs/usage.md`](docs/usage.md).**
+
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install -e ".[dev]"
+.venv/bin/python -m pip install -e ".[dev]"        # add ".[semantic]" for embeddings/vector recall
+docker compose up -d redis                          # optional: live Redis (redis-stack); else JSON fallback
 
 # Dry-run on the bundled messy repo (no changes written): see the plan, the verified
 # edits (dead code removed + cleanup), and the before/after metrics.
@@ -47,15 +50,27 @@ python3 -m venv .venv
 # subsequent runs replay that cache offline (no key needed).
 .venv/bin/refactorika demo_repo --llm
 
+# Run the agentic campaign (audit -> plan -> specialist agents) through the verified engine.
+# Applies in place; complexity decomposition needs ANTHROPIC_API_KEY.
+.venv/bin/refactorika demo_repo --agents
+
+# Inspect decision memory / semantic neighbors:
+.venv/bin/refactorika demo_repo --show-memory
+.venv/bin/refactorika demo_repo --show-similar orders.compute_total
+
 # Tests (offline — no Redis, no API key needed):
-.venv/bin/python -m pytest -q
+REFACTORIKA_OFFLINE=1 .venv/bin/python -m pytest -q
 ```
 
 ## Run as an MCP server (use inside an agent)
 
 ```bash
-.venv/bin/python -m refactorika.mcp_server   # stdio MCP; tools: build_graph, get_plan, run_pipeline, get_log
+.venv/bin/python -m refactorika.mcp_server   # stdio MCP server
+claude mcp add refactorika -- .venv/bin/python -m refactorika.mcp_server
 ```
+Tools: `build_graph`, `get_plan`, `run_pipeline`, `run_agents`, `analyze_file`,
+`find_duplicates`, `find_dead_code`, `apply_and_verify(_multi)`, `generate_docs`,
+`get_context_map`, `get_log`. Full reference in [`docs/usage.md`](docs/usage.md).
 
 ## Providers, memory, and evaluation
 
