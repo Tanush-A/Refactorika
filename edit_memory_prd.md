@@ -65,12 +65,15 @@ A developer or team with a legacy or partially-migrated codebase who wants to br
 - Metric tracked: tokens used for audit + refactor vs the realistic baseline above.
 
 ### 5.5 Verification Harness
-Automated guardrails layered on top of guided execution. Every proposed edit passes through this pipeline before it is committed:
-1. **Pre-edit gate** — the proposed edit is parsed with `tree-sitter-typescript`; reject if it fails to parse or does not match the confirmed target variant.
-2. **Post-edit type check** — run `tsc --noEmit` (project scope, or single-file scope where configured) on touched files; if it fails, roll the edit back.
-3. **Call-site sweep** — after a successful edit, re-scan the *recorded* call sites (AST + grep) to confirm none were left in the old convention; surface any stragglers. Note: this catches incompletely-converted *known* sites; it cannot find sites the §5.2 detection never recorded (true false negatives), which are addressed only by the ground-truth eval (§7).
-4. **Reject → re-propose loop** — on any gate failure, surface the failure reason to the agent and let it re-propose, up to a bounded retry count. (This defines the previously-undefined failure path in §5.3.)
-5. **Per-edit audit log** — append a structured record (file, checks run, pass/fail, retry count, final diff) to the local JSON store, powering the demo dashboard.
+Automated guardrails layered on top of guided execution. Every proposed edit passes through this pipeline before it is committed. Gates run in order and short-circuit on first failure (cheapest/fastest gates first):
+1. **Pre-edit gate (parse + variant)** — the proposed edit is parsed with `tree-sitter-typescript`; reject if it fails to parse or does not match the confirmed target variant.
+2. **Lint/format gate** — run ESLint/Prettier on the edited file(s); reject if the edit introduces new lint errors or formatting violations, so the convention fix doesn't smuggle in unrelated style regressions. Scoped to the touched files and to the repo's existing config (no edit is rejected for pre-existing violations it didn't introduce).
+3. **Post-edit type check** — run `tsc --noEmit` (project scope, or single-file scope where configured) on touched files; if it fails, roll the edit back. *No edit is committed in a non-compiling state.*
+4. **Post-edit test gate (behavioral)** — `tsc --noEmit` proves the edit *compiles*, not that it still *behaves* correctly; an error-handling conversion (e.g. `throw` → `Result<T>`) changes control flow and can regress silently. After the type check passes, run the project's test suite — scoped where possible to tests covering the touched file(s) — and roll the edit back on failure. Depends on the (demo) repo having a runnable test command; where absent, this gate is skipped and the skip is recorded in the audit log so coverage is honest rather than assumed.
+5. **Call-site sweep + handled-result check** — after a successful edit, re-scan the *recorded* call sites (AST + grep) to confirm two things: (a) none were left in the old convention, and (b) callers actually *consume* the new convention rather than silently dropping it — e.g. a `Result<T>` return whose `ok` field is never checked, or a previously-caught error now ignored. Surface any stragglers or unhandled results. Note: this catches incompletely-converted *known* sites; it cannot find sites the §5.2 detection never recorded (true false negatives), which are addressed only by the ground-truth eval (§7).
+6. **Reject → re-propose loop** — on any gate failure, surface the failure reason to the agent and let it re-propose, up to a bounded retry count. (This defines the previously-undefined failure path in §5.3.)
+7. **Escalation / terminal state** — when the bounded retry count is exhausted, the task is **not** force-committed: it is marked `skipped-needs-human`, reverted to its last good state, flagged in the audit log and surfaced to the user, and execution continues with the next task. This defines the terminal outcome of the re-propose loop.
+8. **Per-edit audit log** — append a structured record (file, checks run, pass/fail, retry count, final diff, final status) to the local JSON store, powering the demo dashboard.
 
 ### 5.6 Context File Generation **[Initial]**
 - Input: completed (or in-progress) refactor results + the call-site map from §5.2.
@@ -78,19 +81,28 @@ Automated guardrails layered on top of guided execution. Every proposed edit pas
 - Output: committed context files that future developers and agents read instead of re-deriving structure — closing the loop on the "Edit Memory" name by persisting the audit's findings as durable, human- and agent-readable artifacts.
 - Note: generated from data the audit/plan already compute, so marginal cost is low.
 
+### 5.7 Workflow Safety
+Guardrails that protect the repo *across* edits, not just within a single edit (§5.5):
+- **Per-task git checkpointing** — each task that passes the full §5.5 gate pipeline is committed (or stashed) as its own checkpoint before the next task begins. A failed or interrupted run is recoverable by resetting to the last green checkpoint rather than hand-unwinding partial state. This defines the VCS strategy left implicit in §6.
+- **Atomic multi-file units** — when a convention change spans a symbol *and* its dependents (a file plus its recorded call sites), those edits form one transactional unit: either all member edits pass their gates and the unit is committed together, or the whole unit is rolled back. This prevents leaving a refactored producer (file A) committed while a dependent (file B) that consumes it fails its gate, which would leave A's callers expecting the old convention. Unit boundaries come from the call-site map (§5.2); ordering (§5.2) still applies *between* units.
+- **Blast-radius cap** — reject an edit that touches files outside the current task/unit's planned set; an edit should change only the file under refactor and (within an atomic unit) its recorded dependents, nothing more.
+- **Convergence re-audit** — after a run, re-run the audit (§5.1); adoption of the confirmed convention should converge toward ~100% on the targeted files. Any remaining deviations are either `skipped-needs-human` tasks (§5.5) or detection blind spots (§10), and are reported as such — closing the loop instead of asserting success.
+
 ## 6. Architecture
 
-- **Delivery form**: a plugin that hooks into an existing agent loop / IDE (Claude Code, Cursor, etc.) via a thin plugin SDK adapter, rather than being a standalone IDE or a separate server process. The plugin registers a set of actions/hooks (`run_audit`, `confirm_convention`, `get_plan`, `check_convention`, `get_impact`, `verify_edit`, `run_typecheck`, `record_edit`) that the host agent invokes in-process during its loop. `verify_edit` runs the §5.5 gate pipeline; `run_typecheck` wraps `tsc --noEmit`; `confirm_convention` captures the human-confirm decision from §5.1. A pre-edit/post-edit hook lets the plugin gate edits the host agent proposes without the agent having to call the gate explicitly.
+- **Delivery form**: a plugin that hooks into an existing agent loop / IDE (Claude Code, Cursor, etc.) via a thin plugin SDK adapter, rather than being a standalone IDE or a separate server process. The plugin registers a set of actions/hooks (`run_audit`, `confirm_convention`, `get_plan`, `check_convention`, `get_impact`, `verify_edit`, `run_typecheck`, `run_lint`, `run_tests`, `checkpoint`, `record_edit`) that the host agent invokes in-process during its loop. `verify_edit` runs the §5.5 gate pipeline (parse → lint → typecheck → tests → call-site/handled-result sweep); `run_typecheck` wraps `tsc --noEmit`; `run_lint` wraps ESLint/Prettier; `run_tests` wraps the repo's test command; `checkpoint` commits/stashes a passed task per §5.7; `confirm_convention` captures the human-confirm decision from §5.1. A pre-edit/post-edit hook lets the plugin gate edits the host agent proposes without the agent having to call the gate explicitly.
 - **Fallback delivery form**: CLI (`editmemory audit <repo>`, `editmemory plan`, `editmemory check <diff>`) that works against git history/diffs directly, for use without a live agent loop wired up.
-- **Storage**: local JSON file in the repo (audit results, confirmed rule definition, call-site map, per-edit verification log). Log schema per edit: `{ file, variant_before, variant_after, checks: { parse, typecheck, callsite_sweep }, retries, diff }`.
+- **Storage**: local JSON file in the repo (audit results, confirmed rule definition, call-site map, per-edit verification log). Log schema per edit: `{ file, unit_id, variant_before, variant_after, checks: { parse, lint, typecheck, tests, callsite_sweep, handled_result }, retries, status, checkpoint_ref, diff }` where `status ∈ { committed, rolled-back, skipped-needs-human }` and `checkpoint_ref` is the git ref of the per-task checkpoint (§5.7); skipped gates (e.g. tests where no test command exists) are recorded explicitly rather than omitted.
+- **Transactional model**: edits are grouped into atomic units (§5.7) keyed by `unit_id`; a unit is committed as a single checkpoint only when every member edit passes the §5.5 pipeline, else the whole unit is rolled back.
 
 ## 7. Success metrics (for the demo)
 
 - Audit correctly identifies the dominant convention and flags deviating files on a constructed/curated demo repo with known, deliberate inconsistency.
 - Guided execution catches at least one deliberately planted convention violation and one *planted, ground-truth-known* missed call site, live, in the demo.
 - **Ground-truth eval:** on the curated demo repo (whose true call-site set is known), report call-site detection precision/recall. This is the honest source for any false-negative number — **not** Sentry (§13).
-- **Every committed edit passes the parse + `tsc --noEmit` gate**; no edit is committed in a non-compiling state.
-- **The reject → re-propose loop demonstrably recovers** from a deliberately planted bad edit (rollback + successful re-proposal), live, in the demo.
+- **Every committed edit passes the full §5.5 gate pipeline** (parse + lint + `tsc --noEmit` + tests + call-site/handled-result sweep); no edit is committed in a non-compiling, lint-failing, or test-failing state.
+- **The behavioral test gate (§5.5) catches at least one planted behavior-changing edit** that compiles cleanly but breaks a test (e.g. a `throw` → `Result<T>` conversion whose caller stops handling the error), live, in the demo.
+- **The reject → re-propose loop demonstrably recovers** from a deliberately planted bad edit (rollback to the §5.7 checkpoint + successful re-proposal), and a deliberately unrecoverable edit terminates as `skipped-needs-human` (§5.5) rather than being force-committed, live, in the demo.
 - **Context files (§5.6)** are generated for the refactored modules and accurately reflect the post-refactor convention and key dependents.
 - Token usage for audit + refactor is a fraction of the realistic agent-loop baseline on the demo repo (§5.4). Scaling claims (sub-linear in repo size) require multiple repo sizes to demonstrate and are a **[Reach]** measurement.
 
@@ -100,9 +112,11 @@ Automated guardrails layered on top of guided execution. Every proposed edit pas
 2. Run audit → show report (dominant pattern, deviating files).
 3. Run plan → show ordered task list with call-site counts.
 4. Run guided execution → watch 3-4 files get fixed; live catch of a violation and a *planted, ground-truth-known* missed call site.
-5. **Plant a bad edit** → show the pre-edit/typecheck gate reject it, roll back, and the agent recover via the re-propose loop.
-6. Show token-usage chart: Edit Memory vs the realistic agent-loop baseline.
-7. Open a generated context file (§5.6) for a refactored module — show it accurately reflects the new convention and its dependents.
+5. **Plant a compile-clean but behavior-breaking edit** → show the test gate (§5.5) catch it after `tsc` passes, roll back to the §5.7 checkpoint, and the agent recover via the re-propose loop.
+6. **Plant an unrecoverable edit** → show retries exhaust and the task terminate as `skipped-needs-human` (§5.5), surfaced to the user instead of force-committed.
+7. Show token-usage chart: Edit Memory vs the realistic agent-loop baseline.
+8. Open a generated context file (§5.6) for a refactored module — show it accurately reflects the new convention and its dependents.
+9. Run the convergence re-audit (§5.7) → adoption near 100% on targeted files, with any `skipped-needs-human` tasks and detection blind spots reported honestly.
 
 ## 9. Build plan / time estimate (hackathon)
 
@@ -112,14 +126,16 @@ Automated guardrails layered on top of guided execution. Every proposed edit pas
 | Refactor plan / call-site detection (AST + grep) | 3-5 hrs |
 | Guided execution + consistency checks | 2-3 hrs |
 | Verification harness (parse gate, `tsc` gate, sweep, re-propose loop) | 2-3 hrs |
+| Lint/format + behavioral test gates (§5.5) | 1-2 hrs |
+| Workflow safety (§5.7) — per-task git checkpointing, atomic units, escalation/`skipped-needs-human` | 2-3 hrs |
 | Context efficiency layer + comparison metric | 2-3 hrs |
 | Context file generation (§5.6) **[Initial]** | 1-2 hrs |
 | Redis integration (§12) — storage, Agent Memory, Context Retriever, LangCache **[Initial]** | 3-5 hrs |
 | Demo repo construction + dashboard | 3-5 hrs |
-| **Total (Initial)** | **22-32 hrs** |
+| **Total (Initial)** | **25-37 hrs** |
 | Sentry integration (§13) — SDK + per-tool spans **[Reach]** | +1-2 hrs |
 
-**Build order:** ship a vertical slice (one file, end-to-end: audit → confirm → plan → check → verify → commit) on a 2-file repo *before* broadening to 10-15 files. This guarantees a demoable artifact even if audit generalization lags.
+**Build order:** ship a vertical slice (one file, end-to-end: audit → confirm → plan → check → verify → checkpoint/commit) on a 2-file repo *before* broadening to 10-15 files. This guarantees a demoable artifact even if audit generalization lags. Within the harness, land gates in order of value-per-hour: parse + `tsc` first, then the behavioral test gate (§5.5), then lint/format; workflow safety (§5.7) can start as plain per-task commits and grow into atomic units only if time allows.
 
 ## 10. Key risks
 
@@ -128,6 +144,8 @@ Automated guardrails layered on top of guided execution. Every proposed edit pas
 - **Inferred/imported-type blind spot**: tree-sitter-only detection (§5.1) sees syntax, not resolved types, so functions with *inferred* return types or `Result` aliases defined in other files are missed or left unclassified. Accepted for v1 and framed honestly; the TypeScript compiler API would close this gap (future scope). The curated demo repo should use explicit annotations so the audit reflects true adoption.
 - **Time risk**: audit step is the most open-ended; should be timeboxed hardest and descoped first if behind schedule.
 - **Harness dependency risk**: the typecheck gate depends on the demo repo having a working `tsconfig.json` and a fast `tsc --noEmit`; large projects may make this slow. Mitigated by single-file-scope checking and keeping the demo repo small. Timebox the `tsc` integration.
+- **Test-gate dependency risk**: the behavioral test gate (§5.5) depends on the demo repo shipping a fast, reliable, deterministic test suite with coverage of the touched files; flaky or slow tests would stall the loop or cause false rollbacks. Mitigated by curating a small deterministic test suite scoped to the refactored modules, and by recording a skip (not a silent pass) where no test covers a file. Descopable to logs-only if behind schedule.
+- **Atomicity complexity risk**: full transactional multi-file units (§5.7) add rollback bookkeeping that can over-run a hackathon budget. Mitigated by the build order above — start with per-task git checkpoints (already most of the safety value) and only add cross-file atomic units if time allows.
 
 ## 11. Future scope (explicitly out of v1)
 
