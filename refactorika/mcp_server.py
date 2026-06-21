@@ -153,6 +153,17 @@ def confirm_plan(decision: str = "approve", order: list[str] | None = None) -> d
 
 
 @mcp.tool()
+def run_agents(max_workers: int = 4) -> dict:
+    """Dispatch the confirmed plan to specialist agents in parallel; returns a run summary.
+
+    Requires get_plan + confirm_plan to have been called first.
+    Golden path: audit_repo → get_plan → confirm_plan → run_agents → get_log
+    """
+    from .agents.orchestrator import dispatch_plan
+    return dispatch_plan(_storage, max_workers)
+
+
+@mcp.tool()
 def get_log() -> list[dict]:
     """Return the append-only edit log (powers the dashboard)."""
     return _storage.get_log()

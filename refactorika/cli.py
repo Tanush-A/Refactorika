@@ -154,7 +154,7 @@ def cmd_scan(path: str, no_dupes: bool, no_dead: bool, no_docs: bool) -> None:
     print()
 
 
-def cmd_fix(path: str, dry_run: bool, kinds: list[str]) -> None:
+def cmd_fix(path: str, dry_run: bool, kinds: list[str], multi_agent: bool = False) -> None:
     """Auto-apply mechanical fixes: reorder_imports and remove_dead_code (high confidence only)."""
     from .analysis.dead_code import find_dead_code  # noqa: PLC0415
     from .core.apply import apply_and_verify  # noqa: PLC0415
@@ -163,6 +163,21 @@ def cmd_fix(path: str, dry_run: bool, kinds: list[str]) -> None:
 
     p = Path(path).resolve()
     storage = Storage()
+
+    if multi_agent:
+        from .agents.orchestrator import dispatch_plan
+        print(f"\nRefactorika fix (multi-agent): {p}")
+        result = dispatch_plan(storage)
+        if "error" in result:
+            print(f"  error: {result['error']}")
+            print("  Tip: run `get_plan` then `confirm_plan` first, or omit --multi-agent.")
+        else:
+            print(f"  committed: {result['committed']}  rolled-back: {result['rolled_back']}  skipped: {result['skipped']}")
+            if result["rolled_back"]:
+                print("  run: python -m refactorika.dashboard  to see failure reasons")
+        print()
+        return
+
     py_files = sorted(p.rglob("*.py")) if p.is_dir() else [p]
     py_files = [f for f in py_files if not any(
         part in {".venv", "__pycache__", ".git", "tests"} for part in f.parts
@@ -311,6 +326,10 @@ def main() -> None:
         "--kinds", default="imports,dead",
         help="Comma-separated fix kinds to apply (default: imports,dead)",
     )
+    fix_p.add_argument(
+        "--multi-agent", action="store_true",
+        help="Dispatch confirmed plan via parallel specialist agents (requires get_plan + confirm_plan first)",
+    )
 
     sub.add_parser("serve", help="Start the MCP server")
 
@@ -320,7 +339,7 @@ def main() -> None:
         cmd_scan(args.path, args.no_dupes, args.no_dead, args.no_docs)
     elif args.command == "fix":
         kinds = [k.strip() for k in args.kinds.split(",")]
-        cmd_fix(args.path, args.dry_run, kinds)
+        cmd_fix(args.path, args.dry_run, kinds, getattr(args, "multi_agent", False))
     elif args.command == "serve" or args.command is None:
         from .mcp_server import main as mcp_main  # noqa: PLC0415
         mcp_main()
