@@ -1,0 +1,6 @@
+.venv/
+.refactorika/
+__pycache__/
+*.pyc
+.env
+demo_repo/.git/
