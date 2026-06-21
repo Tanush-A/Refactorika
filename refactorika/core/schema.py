@@ -151,6 +151,7 @@ class ModuleContext:
     flagged: list[str] = field(default_factory=list)
     changed_since_last: list[str] = field(default_factory=list)
     decisions: list[str] = field(default_factory=list)
+    last_updated_run: str = ""  # run stamp from when this context was last persisted
 
     def to_dict(self) -> dict:
         return {
@@ -161,6 +162,7 @@ class ModuleContext:
             "flagged": self.flagged,
             "changed_since_last": self.changed_since_last,
             "decisions": self.decisions,
+            "last_updated_run": self.last_updated_run,
         }
 
     @classmethod
@@ -174,4 +176,5 @@ class ModuleContext:
             flagged=d.get("flagged", []),
             changed_since_last=d.get("changed_since_last", []),
             decisions=d.get("decisions", []),
+            last_updated_run=d.get("last_updated_run", ""),
         )

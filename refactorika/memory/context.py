@@ -73,10 +73,45 @@ class ContextRetriever:
         except Exception:
             return {}
 
-    def dependents(self, module: str) -> list[str]:
-        """Return module paths that depend on this module (from agent memory)."""
+    def dependents(self, module: str, root: str | None = None) -> list[str]:
+        """Return module names that depend on *module*, computed from the call graph.
+
+        Reads the actual code (imports + cross-module references) via
+        ``analysis.call_graph`` rather than trusting stored ``ctx.dependents``
+        (which is circular and empty on a fresh repo). Best-effort: if the graph
+        can't be built/resolved, falls back to the stored agent-memory view.
+        """
+        if root:
+            try:
+                deps = self._dependents_from_call_graph(module, root)
+                if deps is not None:
+                    return deps
+            except Exception:
+                pass
+
+        # Fallback: stored agent-memory view (may be empty on a fresh repo).
         all_ctxs = self._memory.all_contexts()
         return [mod for mod, ctx in all_ctxs.items() if module in ctx.dependents]
+
+    def _dependents_from_call_graph(self, module: str, root: str) -> list[str] | None:
+        """Modules importing/referencing *module* (by final segment), via call graph."""
+        from refactorika.analysis.call_graph import CallGraph  # noqa: PLC0415
+
+        cg = CallGraph.build(root)
+        target = module.split(".")[-1]
+        dependents: set[str] = set()
+        for qualname, targets in (
+            (q, cg.edges_from(q)) for q in cg.all_symbols()
+        ):
+            src_module = qualname.rsplit(".", 1)[0] if "." in qualname else qualname
+            if src_module.split(".")[-1] == target:
+                continue  # references within the same module aren't "dependents"
+            for t in targets:
+                t_module = t.rsplit(".", 1)[0] if "." in t else t
+                if t_module.split(".")[-1] == target:
+                    dependents.add(src_module)
+                    break
+        return sorted(dependents)
 
 
 def _is_stdlib(module: str) -> bool:

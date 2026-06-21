@@ -51,7 +51,7 @@ def apply_and_verify_multi(
         _make_diff(originals[p], edits[p], Path(p).name) for p in edits
     )
     file_strs = [str(rp) for rp in paths.values()]
-    retries = storage.count_attempts(str(first_path))
+    retries = storage.count_attempts(file_strs)
 
     record = EditRecord(
         file=str(first_path),

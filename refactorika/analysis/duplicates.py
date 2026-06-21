@@ -167,9 +167,8 @@ def find_duplicates(
             fingerprint_map[sha1].append((file_str, name, line))
 
     structural_pairs: list[DuplicatePair] = []
-    # Track which (file, name) combos are already in structural pairs
-    structural_covered: set[tuple[str, str]] = set()
-    rank = 0
+    # Track exact structural pairs already emitted, to dedupe against tier 2.
+    structural_pair_keys: set[frozenset] = set()
 
     for sha1, members in fingerprint_map.items():
         if len(members) < 2:
@@ -184,7 +183,6 @@ def find_duplicates(
                 ref_b = SymbolRef(file=fb, name=nb, line=lb)
 
                 target, reason = _pick_consolidation_target(ref_a, ref_b, sources)
-                rank += 1
 
                 structural_pairs.append(
                     DuplicatePair(
@@ -194,15 +192,15 @@ def find_duplicates(
                         match_type="structural",
                         consolidation_target=target,
                         reason=reason,
-                        rank=rank,
+                        rank=100,  # round(1.0 * 100)
                     )
                 )
-                structural_covered.add((fa, na))
-                structural_covered.add((fb, nb))
+                structural_pair_keys.add(frozenset({f"{fa}:{na}", f"{fb}:{nb}"}))
 
     # ------------------------------------------------------------------
     # Tier 2: Semantic similarity via embeddings
     # ------------------------------------------------------------------
+    structural_pairs.sort(key=lambda p: p.rank, reverse=True)
     result: dict = {
         "path": path,
         "pairs": [p.to_dict() for p in structural_pairs],
@@ -258,31 +256,29 @@ def find_duplicates(
             n_name = n_meta.get("name", "")
             n_line = n_meta.get("line", 0)
 
-            # Skip if already covered by tier-1 structural pairs
-            if (file_str, name) in structural_covered and (
-                n_file, n_name
-            ) in structural_covered:
+            # Skip only if this exact pair was already emitted in tier 1.
+            if frozenset({query_key, neighbor.key}) in structural_pair_keys:
                 continue
 
             ref_a = SymbolRef(file=file_str, name=name, line=line)
             ref_b = SymbolRef(file=n_file, name=n_name, line=n_line)
 
             target, reason = _pick_consolidation_target(ref_a, ref_b, sources)
-            rank += 1
+            similarity = round(neighbor.score, 4)
 
             semantic_pairs.append(
                 DuplicatePair(
                     a=ref_a,
                     b=ref_b,
-                    similarity=round(neighbor.score, 4),
+                    similarity=similarity,
                     match_type="semantic",
                     consolidation_target=target,
                     reason=reason,
-                    rank=rank,
+                    rank=round(similarity * 100),
                 )
             )
 
-    result["pairs"] = [p.to_dict() for p in structural_pairs] + [
-        p.to_dict() for p in semantic_pairs
-    ]
+    all_pairs = structural_pairs + semantic_pairs
+    all_pairs.sort(key=lambda p: p.rank, reverse=True)
+    result["pairs"] = [p.to_dict() for p in all_pairs]
     return result

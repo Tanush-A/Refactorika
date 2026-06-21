@@ -89,6 +89,21 @@ def test_tier1_only_when_embeddings_unavailable(tmp_path: Path, monkeypatch) -> 
     assert any(p["match_type"] == "structural" for p in result["pairs"])
 
 
+def test_structural_pairs_ranked_100_and_sorted(tmp_path: Path) -> None:
+    """Structural pairs score round(similarity*100)=100, and results sort by rank desc."""
+    # Two independent clone groups -> at least two structural pairs.
+    (tmp_path / "a.py").write_text(CLONE_A)
+    (tmp_path / "b.py").write_text(CLONE_B)
+
+    storage = _make_storage(tmp_path)
+    result = find_duplicates(str(tmp_path), storage, _make_vi(storage))
+
+    struct = [p for p in result["pairs"] if p["match_type"] == "structural"]
+    assert struct and all(p["rank"] == 100 for p in struct)
+    ranks = [p["rank"] for p in result["pairs"]]
+    assert ranks == sorted(ranks, reverse=True)  # sorted descending
+
+
 def test_fingerprint_cached(tmp_path: Path) -> None:
     """Second call with same file should use cached fingerprints (no crash)."""
     f1 = tmp_path / "a.py"
