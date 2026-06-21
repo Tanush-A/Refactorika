@@ -5,6 +5,6 @@ __pycache__/
 .env
 demo_repo/.git/
 
-# Benchmark data + run artifacts (fetched/generated, never committed)
+# Fetched benchmark repos (mixed/GPL licenses, ~53MB) — never committed.
 eval/external/
-eval/results/
+# eval/results/ IS committed: it's our reported numbers (JSON + markdown tables).

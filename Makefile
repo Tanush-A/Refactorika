@@ -1,21 +1,29 @@
-.PHONY: help setup fetch eval eval-no-fetch clean-eval
+.PHONY: help install fetch eval-smoke eval-inscope eval-ablation eval-all clean-eval
+
+PY ?= .venv/bin/python
 
 help:  ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| sort \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
-setup:  ## Create eval venv and install dependencies
-	bash eval/run_eval.sh --setup
+install:  ## Create the project venv and install (engine + dev tools)
+	python3 -m venv .venv && $(PY) -m pip install -e ".[dev]"
 
-fetch:  ## Fetch benchmark data into eval/external/ (gitignored)
+fetch:  ## Fetch RefactorBench into eval/external/ (gitignored, ~53MB)
 	bash eval/fetch_benchmarks.sh
 
-eval:  ## Full evaluation: setup -> fetch benchmarks -> run
-	bash eval/run_eval.sh
+eval-smoke:  ## RefactorBench: 5 in-scope tasks (quick harness check)
+	$(PY) eval/run_eval.py --smoke
 
-eval-no-fetch:  ## Run evaluation using already-fetched benchmark data
-	bash eval/run_eval.sh --no-fetch
+eval-inscope:  ## RefactorBench: all in-scope tasks
+	$(PY) eval/run_eval.py --in-scope
 
-clean-eval:  ## Remove the eval venv (keeps fetched benchmark data)
-	rm -rf eval/.venv
+eval-ablation:  ## RefactorBench: in-scope, decision-memory ON vs OFF
+	$(PY) eval/run_eval.py --in-scope --ablation
+
+eval-all:  ## RefactorBench: every task (out-of-scope declined honestly)
+	$(PY) eval/run_eval.py --all
+
+clean-eval:  ## Remove fetched benchmark data (keeps eval/results/)
+	rm -rf eval/external

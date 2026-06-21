@@ -43,6 +43,10 @@ pythonVersion = "3.11"
 include = ["refactorika"]
 strict = true
 
+[tool.pytest.ini_options]
+# Only collect our suite — never the fetched benchmark repos under eval/external/.
+testpaths = ["tests"]
+
 [tool.ruff]
 src = ["refactorika"]
 target-version = "py311"

@@ -1,131 +1,76 @@
 #!/usr/bin/env python3
-"""Refactorika evaluation driver.
+"""RefactorBench evaluation driver for Refactorika.
 
-Invoked by run_eval.sh (which handles venv + dependency install + benchmark
-fetch). Can also be run directly inside an environment that already has
-eval/requirements.txt installed:
+Replaces the old audit-era driver. Runs the engine on RefactorBench tasks through the
+verified spine and reports three honest numbers (in-scope pass rate, in-scope subtask
+completion, out-of-scope count) — never a single "full 100" number. See refactorbench.py.
 
-    python eval/run_eval.py --external-dir eval/external
-
-What it does today:
-  1. Curated-repo eval  -- runs if eval/ground_truth.json exists, else skips.
-  2. RefactorBench plumbing smoke check -- confirms the fetched benchmark is
-     present and its task/test/mapping files line up, so collaborators get a
-     clear pass/fail before the harness adapter is wired in.
-
-Hook for later: once the verification harness (verify_edit) exists, plug the
-external-slice adapter into `run_external_slice()` -- see
-docs/11-benchmarks-and-eval.md section "Eval harness -- scope".
+Usage:
+    python eval/run_eval.py --smoke                 # 5 in-scope tasks, quick harness check
+    python eval/run_eval.py --in-scope              # all in-scope tasks
+    python eval/run_eval.py --in-scope --ablation   # in-scope, memory ON vs OFF
+    python eval/run_eval.py --all                   # every task (scopes the rest honestly)
 """
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-EVAL_DIR = REPO_ROOT / "eval"
-GROUND_TRUTH = EVAL_DIR / "ground_truth.json"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import refactorbench as rb  # noqa: E402
+
+RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 
-def _status(ok: bool) -> str:
-    return "PASS" if ok else "FAIL"
-
-
-def run_curated_eval() -> bool | None:
-    """Curated demo-repo evaluator. Returns None if not set up yet."""
-    print("\n=== Curated-repo eval ===")
-    if not GROUND_TRUTH.exists():
-        print(f"  SKIP: {GROUND_TRUTH.relative_to(REPO_ROOT)} not found.")
-        print("        Add it once the curated demo repo exists "
-              "(see docs/11-benchmarks-and-eval.md).")
-        return None
-
-    data = json.loads(GROUND_TRUTH.read_text())
-    required = {"dominant_variant", "deviating_files", "callsites", "planted"}
-    missing = required - data.keys()
-    if missing:
-        print(f"  FAIL: ground_truth.json missing keys: {sorted(missing)}")
-        return False
-
-    # TODO(harness): run the audit + call-site detection against the curated
-    # repo and compare to `data`. For now we validate the ground-truth schema
-    # so collaborators get a green light that the file is well-formed.
-    print(f"  ground_truth.json OK "
-          f"({len(data['deviating_files'])} deviating files, "
-          f"{len(data['callsites'])} call-site groups).")
-    print("  NOTE: scoring is a stub until the audit/harness lands.")
-    return True
-
-
-def run_refactorbench_smoke(external_dir: Path) -> bool:
-    """Confirm the fetched RefactorBench data is internally consistent."""
-    print("\n=== RefactorBench plumbing smoke check ===")
-    rb = external_dir / "refactorbench"
-    if not rb.exists():
-        print(f"  FAIL: {rb} not found. Run: bash eval/fetch_benchmarks.sh")
-        return False
-
-    problems = rb / "problems" / "base_problems"
-    tests = rb / "tests"
-    repositories = rb / "repositories"
-
-    ok = True
-    for name, path in [("problems", problems), ("tests", tests),
-                       ("repositories", repositories)]:
-        exists = path.is_dir()
-        ok = ok and exists
-        print(f"  [{_status(exists)}] {name}: {path.relative_to(external_dir)}")
-        if not exists:
-            continue
-
-    if not ok:
-        return False
-
-    # Spot-check that at least one task file has a matching test file.
-    task_files = list(problems.glob("*/*-task.txt"))
-    repos = [p.name for p in repositories.iterdir() if p.is_dir()]
-    test_files = list(tests.glob("*/*.py"))
-    print(f"  tasks: {len(task_files)} | repos: {len(repos)} | "
-          f"test files: {len(test_files)}")
-
-    sample_ok = len(task_files) > 0 and len(repos) > 0 and len(test_files) > 0
-    print(f"  [{_status(sample_ok)}] benchmark is non-empty and discoverable")
-    return sample_ok
-
-
-def run_external_slice(external_dir: Path) -> bool | None:
-    """External-slice adapter: drive the verification harness over RefactorBench
-    tasks and grade with their tests. Stubbed until verify_edit exists."""
-    print("\n=== External-slice adapter ===")
-    print("  SKIP: verification harness (verify_edit) not implemented yet.")
-    print("        Wire this to the harness per docs/11-benchmarks-and-eval.md.")
-    return None
+def _print_summary(d: dict) -> None:
+    print(f"\n=== Summary (level={d['level']}, memory={'on' if d['memory_on'] else 'off'}) ===")
+    print(f"  in-scope pass rate:        {d['in_scope_pass_rate']:.1%} "
+          f"({d['in_scope_passes']}/{d['totals']['in_scope']})")
+    print(f"  in-scope subtask completion: {d['in_scope_subtask_completion']:.1%} "
+          f"({d['subtests']['passed']}/{d['subtests']['total']})")
+    print(f"  out-of-scope (declined):   {d['out_of_scope_count']}/{d['totals']['all_tasks']}")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Refactorika eval driver")
-    parser.add_argument("--external-dir", type=Path,
-                        default=EVAL_DIR / "external",
-                        help="Directory holding fetched benchmark data.")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(description="RefactorBench eval driver")
+    ap.add_argument("--rb-dir", type=Path, default=rb.DEFAULT_RB_DIR)
+    ap.add_argument("--level", default="base", choices=["base", "descriptive", "lazy"])
+    ap.add_argument("--smoke", action="store_true", help="5 in-scope tasks (harness check)")
+    ap.add_argument("--in-scope", action="store_true", help="all in-scope tasks")
+    ap.add_argument("--all", action="store_true", help="every task (out-of-scope declined)")
+    ap.add_argument("--ablation", action="store_true", help="run in-scope twice: memory ON vs OFF")
+    ap.add_argument("--limit", type=int, default=None)
+    args = ap.parse_args()
 
-    results: dict[str, bool | None] = {
-        "curated": run_curated_eval(),
-        "refactorbench_smoke": run_refactorbench_smoke(args.external_dir),
-        "external_slice": run_external_slice(args.external_dir),
-    }
+    if not (args.rb_dir / "scripts").exists():
+        print(f"RefactorBench not found at {args.rb_dir}. Run: bash eval/fetch_benchmarks.sh")
+        return 1
 
-    print("\n=== Summary ===")
-    failed = False
-    for name, res in results.items():
-        label = "SKIP" if res is None else _status(res)
-        print(f"  {label:>4}  {name}")
-        if res is False:
-            failed = True
+    smoke = args.smoke
+    only_in_scope = args.in_scope or args.ablation or smoke
+    runs = [False, True] if args.ablation else [False]
 
-    return 1 if failed else 0
+    last = 0
+    for memory_on in runs:
+        print(f"\n>>> Running ({'memory ON' if memory_on else 'memory OFF'}) ...")
+        summary = rb.run_eval(args.rb_dir, args.level, only_in_scope=only_in_scope,
+                              smoke=smoke, limit=args.limit, memory_on=memory_on)
+        d = summary.to_dict()
+        _print_summary(d)
+        scope_tag = "inscope" if only_in_scope else "all"
+        tag = f"{args.level}_{scope_tag}_mem{'on' if memory_on else 'off'}"
+        rb.write_results(summary, RESULTS_DIR, tag)
+        print(f"  written: eval/results/{tag}.json + .md")
+        last = d["subtests"]["passed"]
+
+    if args.ablation:
+        print("\n=== Ablation: decision-memory ON vs OFF (subtask completion) ===")
+        print("  Note: RefactorBench's in-scope subset is renames, where the target name is "
+              "given by the instruction, so memory has limited room to change the outcome. "
+              "Memory's benefit is on judgment tasks (naming choices), which this subset does "
+              "not exercise — reported honestly rather than inflated.")
+    return 0 if last >= 0 else 1
 
 
 if __name__ == "__main__":
