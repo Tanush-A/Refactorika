@@ -82,6 +82,27 @@ def test_orchestrator_removes_dead_code_and_keeps_tests_green(tmp_path):
     assert "remove_dead_code" in kinds
 
 
+def test_demo_repo_deterministic_run_is_clean(tmp_path):
+    """Guard the demo: dead-code removed root-to-leaf + cleanup, no reverts, finale green."""
+    import shutil
+    from pathlib import Path
+
+    demo = Path(__file__).resolve().parent.parent / "demo_repo"
+    target = tmp_path / "demo_repo"
+    shutil.copytree(demo, target, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+    storage = Storage(redis_url=None, json_path=tmp_path / "state.json")
+    res = run_pipeline(str(target), apply=False, storage=storage)
+
+    assert res.baseline_tests is True
+    assert res.finale_tests is True
+    assert all(r["status"] == "committed" for r in res.records)  # no reverts
+    kinds = [r["refactor_kind"] for r in res.records]
+    assert kinds.count("remove_dead_code") == 2  # _legacy_discount + orphaned _round_money
+    assert "cleanup" in kinds  # unused `import json` removed
+    assert res.metrics_after["dead_symbols"] == 0
+    assert res.metrics_after["sloc"] < res.metrics_before["sloc"]
+
+
 def test_orchestrator_applies_in_place_when_apply_true(tmp_path):
     src = "def _dead():\n    return 0\n\n\ndef used():\n    return 1\n"
     test = "from lib import used\n\ndef test_used():\n    assert used() == 1\n"

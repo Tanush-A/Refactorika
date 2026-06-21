@@ -46,6 +46,8 @@ strict = true
 src = ["refactorika"]
 target-version = "py311"
 line-length = 100
+# demo_repo is a deliberately messy fixture; eval/external is fetched third-party code.
+extend-exclude = ["demo_repo", "eval/external"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]

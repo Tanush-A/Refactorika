@@ -34,13 +34,16 @@ def deterministic_plan(graph: Graph, root: str | None = None) -> Worklist:
         and graph.symbols[q].kind != "module"
         and graph.symbols[q].is_private  # conservative: only auto-remove private
     ]
-    for q in sorted(dead, key=lambda x: pos.get(x, 1 << 30)):
+    # Removal goes ROOT-to-LEAF (caller before callee): removing a dead leaf while a
+    # still-present dead caller references it would leave an undefined name. This is the
+    # reverse of the refactor order, so we negate the position.
+    for rank, q in enumerate(sorted(dead, key=lambda x: pos.get(x, 1 << 30), reverse=True)):
         items.append(PlanItem(
             spec=TransformSpec(
                 kind="remove_dead_code", target=q,
                 rationale="private symbol unreachable from any entry point",
             ),
-            order_index=pos.get(q, 0),
+            order_index=rank,  # dead removals run first, root-to-leaf, before cleanup
             impact=sorted(impact_of(graph, q)),
         ))
 
@@ -57,7 +60,8 @@ def deterministic_plan(graph: Graph, root: str | None = None) -> Worklist:
                 kind="cleanup", target=m, params={"files": [sym.file]},
                 rationale="deterministic cleanup (unused imports, simplifications, format)",
             ),
-            order_index=pos.get(m, 0),
+            # Cleanup runs after every dead-code removal (offset keeps it last).
+            order_index=1_000_000 + pos.get(m, 0),
             impact=sorted(module_impact),
         ))
 
