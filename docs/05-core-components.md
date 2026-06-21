@@ -39,6 +39,6 @@ See [05a-verification-harness.md](05a-verification-harness.md) for the full gate
 
 ## 5.6 Context File Generation **[Initial]**
 - **Input:** completed (or in-progress) refactor results + the call-site map from §5.2.
-- **Process:** emit a structured context file per module/directory (e.g. `.editmemory/context/<module>.md`) summarizing the now-canonical convention, key exported symbols, and their dependents.
-- **Output:** committed context files that future developers and agents read instead of re-deriving structure — closing the loop on the "Edit Memory" name by persisting the audit's findings as durable, human- and agent-readable artifacts.
+- **Process:** emit a structured context file per module/directory (e.g. `.refactorika/context/<module>.md`) summarizing the now-canonical convention, key exported symbols, and their dependents.
+- **Output:** committed context files that future developers and agents read instead of re-deriving structure — persisting the audit's findings as durable, human- and agent-readable artifacts so the codebase stays understandable after the refactor.
 - **Note:** generated from data the audit/plan already compute, so marginal cost is low.

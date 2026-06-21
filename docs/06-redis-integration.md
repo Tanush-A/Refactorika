@@ -4,7 +4,7 @@ Describes how Redis Iris slots into the existing architecture ([04-architecture.
 
 ## Why it fits
 
-The Redis track judging criteria specifically calls out using Iris for agent memory, vector search, and context retrieval — not just caching. Edit Memory's core mechanism (a rule list that needs to be retrieved selectively, plus structured lookups like call-site tracking) maps directly onto Iris's actual components rather than needing a bolted-on justification.
+The Redis track judging criteria specifically calls out using Iris for agent memory, vector search, and context retrieval — not just caching. Refactorika's core mechanism (a rule list that needs to be retrieved selectively, plus structured lookups like call-site tracking) maps directly onto Iris's actual components rather than needing a bolted-on justification.
 
 ## Component mapping
 
@@ -21,11 +21,11 @@ The Redis track judging criteria specifically calls out using Iris for agent mem
 - **Vector search (underlying both Agent Memory and Context Retriever) — [Reach]**
   - v1's three fixed, AST-detectable variants are matched *exactly* (more accurate than fuzzy matching here). Semantic vector matching becomes useful only once many convention types exist; it is a Reach capability, not an Initial dependency.
 
-## Architecture note (relative to §6 / [04-architecture.md](04-architecture.md))
+## Architecture note (relative to [04-architecture.md](04-architecture.md))
 
 - Local JSON storage becomes the fallback/offline mode.
 - Primary mode for the demo: Redis Cloud instance backing Agent Memory (rules + session log) and Context Retriever (call-site/dependency lookups).
-- MCP server tools (`run_audit`, `confirm_convention`, `get_plan`, `check_convention`, `get_impact`, `verify_edit`, `run_typecheck`, `record_edit`) call into Redis under the hood instead of reading/writing local JSON.
+- MCP server tools (`run_audit`, `confirm_convention`, `get_plan`, `check_convention`, `get_impact`, `verify_edit`, `run_typecheck`, `run_lint`, `run_tests`, `record_edit`) call into Redis under the hood instead of reading/writing local JSON.
 
 ## Demo addition
 

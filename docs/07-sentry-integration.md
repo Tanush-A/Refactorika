@@ -4,9 +4,9 @@ Describes how Sentry AI Agent Monitoring slots into the existing architecture ([
 
 ## Why it fits
 
-The Sentry track rewards strong technical execution paired with observability/error monitoring, not just a working demo. Edit Memory runs an agent loop over many MCP tool calls, and Sentry surfaces where those calls *throw, fail, or slow down* live — turning tool-level reliability into a visible signal. (The call-site *false-negative* rate is measured separately by the ground-truth eval in [09-success-metrics-and-demo.md](09-success-metrics-and-demo.md), not by Sentry, which has no ground truth; the two are complementary.)
+The Sentry track rewards strong technical execution paired with observability/error monitoring, not just a working demo. Refactorika runs an agent loop over many MCP tool calls, and Sentry surfaces where those calls *throw, fail, or slow down* live — turning tool-level reliability into a visible signal. (The call-site *false-negative* rate is measured separately by the ground-truth eval in [09-success-metrics-and-demo.md](09-success-metrics-and-demo.md), not by Sentry, which has no ground truth; the two are complementary.)
 
-Sentry also directly supports instrumenting MCP servers (tool executions, prompt retrievals, resource access), which matches Edit Memory's delivery form without needing custom monitoring code.
+Sentry also directly supports instrumenting MCP servers (tool executions, prompt retrievals, resource access), which matches Refactorika's delivery form without needing custom monitoring code.
 
 ## Component mapping
 

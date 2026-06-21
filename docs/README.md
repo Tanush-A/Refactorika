@@ -1,6 +1,6 @@
 # Refactorika — Docs
 
-The master spec, broken out by topic. (Project memory / quick context lives in `../CLAUDE.md`.)
+The product spec, broken out by topic. This `docs/` folder is the **source of truth**; `../CLAUDE.md` is the short session-context summary that points here. Scope: everything is **[Initial]** (committed for v1) unless tagged **[Reach]**.
 
 1. [Problem, Solution & Purpose](01-problem-and-purpose.md)
 2. [Target User & Scope](02-target-user.md)
@@ -13,3 +13,4 @@ The master spec, broken out by topic. (Project memory / quick context lives in `
 8. [Risks & Future Scope](08-risks-and-scope.md)
 9. [Success Metrics & Demo Script](09-success-metrics-and-demo.md)
 10. [Usage & User Journey](10-usage-and-user-journey.md)
+11. [Benchmarks & Evaluation](11-benchmarks-and-eval.md)

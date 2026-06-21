@@ -1,0 +1,17 @@
+# Benchmark data — fetched on demand, never committed (mixed/GPL licenses upstream)
+eval/external/
+
+# Eval virtualenv (created by eval/run_eval.sh)
+eval/.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store
