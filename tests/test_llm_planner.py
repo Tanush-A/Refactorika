@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from refactorika.core.storage import Storage
 from refactorika.graph.resolver import build_graph
-from refactorika.llm.client import LLMClient, stub_key
+from refactorika.llm.client import LLMClient
 from refactorika.memory.agent_memory import AgentMemory
 from refactorika.pipeline.planner_llm import (
     _shape_pattern,
@@ -70,14 +70,14 @@ def _stub_client_for_graph(graph, root: str) -> LLMClient:
 
     response = {"new_source": _DECOMPOSED, "helper_names": ["_accumulate"],
                 "rationale": "split accumulation out"}
-    model = LLMClient().model
+    keyer = LLMClient()  # default provider; keys match the planner's default client
     stub = {}
     for _qual, source in _god_functions(graph, root):
         prior = RefactorDecision(pattern=_shape_pattern(source),
                                  transform_kind="decompose_function", target="x",
                                  choice={"helper_names": ["_accumulate"]})
         for p in (_decompose_prompt(source, None), _decompose_prompt(source, prior)):
-            stub[stub_key(model, _SYSTEM, p)] = response
+            stub[keyer.cache_key(_SYSTEM, p)] = response
     return LLMClient(stub=stub)
 
 
@@ -148,7 +148,7 @@ def test_consistency_beat_fires_on_the_real_demo_functions(tmp_path):
     # A stub that returns a (name-agnostic) decomposition for each function, both prompt
     # variants (with and without a recalled prior), all using the same helper names.
     helper_names = ["_line_amount", "_apply_coupon"]
-    model = LLMClient().model
+    keyer = LLMClient()
     stub = {}
     for qual, source in _god_functions(g, str(target)):
         resp = {"new_source": source, "helper_names": helper_names, "rationale": "split"}
@@ -156,7 +156,7 @@ def test_consistency_beat_fires_on_the_real_demo_functions(tmp_path):
                                  transform_kind="decompose_function",
                                  target="x", choice={"helper_names": helper_names})
         for p in (_decompose_prompt(source, None), _decompose_prompt(source, prior)):
-            stub[stub_key(model, _SYSTEM, p)] = resp
+            stub[keyer.cache_key(_SYSTEM, p)] = resp
 
     memory = AgentMemory(Storage(redis_url=None, json_path=tmp_path / "s.json"))
     planner = make_llm_planner(client=LLMClient(stub=stub), memory=memory)
