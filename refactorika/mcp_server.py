@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
+from .agents.orchestrator import run_campaign as _run_campaign
 from .analysis.dead_code import find_dead_code as _find_dead_code
 from .analysis.duplicates import find_duplicates as _find_duplicates
 from .core.analyze import analyze_file as _analyze_file
@@ -137,6 +138,17 @@ def run_pipeline(path: str, apply: bool = False) -> dict:
     authoritative baseline + finale full-suite test results.
     """
     return _run_pipeline(path, apply=apply, storage=_storage).to_dict()
+
+
+@mcp.tool()
+def run_agents(path: str) -> dict:
+    """Run the agentic campaign: audit -> dependency-ordered plan -> specialist agents.
+
+    Each agent brings judgment; the deterministic transform engines + the verified Checker bring
+    correctness (impact-scoped gates, commit or revert per edit). Applies in place. Returns a
+    summary {committed, rolled_back, skipped, records, dominant_finding, tasks}.
+    """
+    return _run_campaign(path, _storage)
 
 
 def main() -> None:

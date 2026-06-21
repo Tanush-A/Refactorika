@@ -46,6 +46,9 @@ def _entry(
                                           "semantic neighbors, then exit."),
     no_tests: bool = typer.Option(False, "--no-tests", help="Skip the test gates (faster)."),
     use_llm: bool = typer.Option(False, "--llm", help="Use the LLM planner (needs API key)."),
+    agents: bool = typer.Option(False, "--agents",
+                                help="Run the agentic campaign (specialist agents) through the "
+                                     "verified engine. Applies in place."),
     rename: list[str] = typer.Option(
         None, "--rename",
         help="Reference-correct rename, repeatable: 'module.qualname=new_name'."),
@@ -64,7 +67,34 @@ def _entry(
     if show_similar:
         _print_similar(path, show_similar)
         return
+    if agents:
+        _run_agents(path, run_tests=not no_tests)
+        return
     _run(path, apply=apply, run_tests=not no_tests, use_llm=use_llm, renames=renames)
+
+
+def _run_agents(path: str, *, run_tests: bool) -> None:
+    """Run the agentic campaign: audit -> dependency-ordered plan -> specialists via the engine."""
+    from refactorika.agents.orchestrator import run_campaign
+
+    storage = Storage()
+    typer.echo(f"\n{_BOLD}Refactorika · agents{_RESET}  ·  {path}  ·  "
+               f"{_c('APPLY (in place)', _RED)}  ·  storage={storage.backend}")
+    summary = run_campaign(path, storage, run_tests=run_tests)
+    if "error" in summary:
+        typer.echo(f"  {_c(summary['error'], _RED)}")
+        return
+    typer.echo(f"\n  finding: {_DIM}{summary.get('dominant_finding')}{_RESET}  "
+               f"· {summary.get('tasks', 0)} task(s)")
+    typer.echo(f"\n{_BOLD}Campaign{_RESET} — "
+               f"{_c(str(summary['committed']) + ' committed', _GREEN)}, "
+               f"{summary['rolled_back']} reverted, {summary['skipped']} skipped")
+    for r in summary["records"]:
+        if "error" in r:
+            typer.echo(f"  {_c('error', _RED):>22}  {r['file']}: {r['error']}")
+        else:
+            _print_record(r)
+    typer.echo("")
 
 
 def _parse_renames(rename: Optional[list[str]]) -> list[tuple[str, str]]:

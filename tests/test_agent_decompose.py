@@ -123,6 +123,51 @@ def test_complexity_agent_decomposes_via_engine_and_verifies(tmp_path):
     assert decision is not None and decision.choice["helper_names"] == ["_accumulate"]
 
 
+def test_dispatch_plan_runs_complexity_agent_through_engine(tmp_path):
+    """Orchestrator wiring: a confirmed plan routes a complexity task to the ComplexityAgent,
+    which decomposes via the deterministic engine + checker. Proven offline with a stub LLM."""
+    from refactorika.agents.complexity_agent import ComplexityAgent as _CA
+    from refactorika.agents.orchestrator import dispatch_plan
+    from refactorika.core.schema import Plan, PlanTask
+
+    (tmp_path / "m.py").write_text(_GOD)
+    (tmp_path / "test_m.py").write_text(
+        "from m import score\n\n"
+        "def test_score():\n"
+        "    assert score([1, 2], 'a', True) == (2 + 4) + 10\n"
+    )
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.name", "t")
+    _git(tmp_path, "config", "user.email", "t@t")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "base")
+
+    root = str(tmp_path)
+    graph = build_graph(root)
+    storage = Storage(redis_url=None, json_path=tmp_path / "s.json")
+    dm = DecisionMemory(storage, agent_memory=AgentMemory(storage))
+    agent = _CA(client=_stub_client(graph, root), decisions=dm)
+
+    plan = Plan(
+        repo=root,
+        dominant_finding="god function",
+        tasks=[PlanTask(
+            file=str(tmp_path / "m.py"),
+            opportunities=[Opportunity(kind="split_function", location="score",
+                                       detail="god fn", rank=10)],
+            dependents=[],
+            order=0,
+        )],
+        confirmed=True,
+    )
+    storage.save_plan(plan.to_dict())
+
+    summary = dispatch_plan(storage, specialists=[agent], run_tests=True)
+
+    assert summary["committed"] == 1, summary
+    assert "_accumulate" in (tmp_path / "m.py").read_text()
+
+
 class _DownClient:
     """A generation client that is simply not reachable."""
 
