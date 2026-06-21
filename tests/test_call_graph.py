@@ -4,7 +4,6 @@ from pathlib import Path
 
 from refactorika.analysis.call_graph import CallGraph
 
-
 SIMPLE = """\
 def foo():
     return 1
@@ -91,3 +90,53 @@ def test_call_sites_count(tmp_path: Path) -> None:
     cg = CallGraph.build(str(tmp_path))
     # foo is called once (by bar)
     assert cg.call_sites("mod.foo") >= 1
+
+
+# B3: __all__ as a tuple / multi-line list must be parsed (AST, not regex).
+TUPLE_ALL = """\
+__all__ = (
+    "_kept_one",
+    "_kept_two",
+)
+
+def _kept_one():
+    return 1
+
+def _kept_two():
+    return 2
+
+def _not_exported():
+    return 3
+"""
+
+
+def test_all_tuple_and_multiline_anchors_entry_points(tmp_path: Path) -> None:
+    (tmp_path / "mod.py").write_text(TUPLE_ALL)
+    cg = CallGraph.build(str(tmp_path))
+    eps = cg.entry_points()
+    assert "mod._kept_one" in eps
+    assert "mod._kept_two" in eps
+    assert "mod._not_exported" not in eps
+
+
+# B3: a multi-line __main__ block's calls must all anchor as entry points.
+MULTILINE_MAIN = """\
+def _setup():
+    return 1
+
+def _go():
+    return 2
+
+if __name__ == "__main__":
+    _setup()
+    result = _go()
+    print(result)
+"""
+
+
+def test_multiline_main_block_calls_are_entry_points(tmp_path: Path) -> None:
+    (tmp_path / "mod.py").write_text(MULTILINE_MAIN)
+    cg = CallGraph.build(str(tmp_path))
+    eps = cg.entry_points()
+    assert "mod._setup" in eps
+    assert "mod._go" in eps
