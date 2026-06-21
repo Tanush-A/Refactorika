@@ -4,18 +4,21 @@
 
 ## 5.1 Convention Audit
 - **Input:** a repository path.
-- **Process:** parse files with `tree-sitter-typescript`, detect instances of the target convention type, classify each instance into a variant.
-- **What counts as an error-handling instance (TypeScript):**
-  - `throw_statement` and `try_statement` / `catch_clause` nodes (exception-style).
-  - Functions whose declared return type is a `Result<T>`-style discriminated union (e.g. `{ ok: true; value: T } | { ok: false; error: E }`, or `neverthrow`-style `Result`/`ResultAsync`).
-  - Functions whose return type is a nullable/sentinel (`T | null`, `T | undefined`) used as the error signal.
-- **Classification:** each instance is bucketed into one of three variants — `exception`, `result-type`, `sentinel` — and attributed to its enclosing function/file.
+- **Process:** parse files with `tree-sitter-python`, detect instances of the target convention type, classify each instance into a variant.
+- **What counts as an error-handling instance (Python):**
+  - `raise_statement` and `try_statement` / `except_clause` nodes (exception-style).
+  - Functions whose **explicitly-annotated** return type is a `Result`-style object — a name from a **configurable known-Result-type list** (the `returns` library's `Result`/`Maybe`, plus local `Result`/`Either` classes and aliases).
+  - Functions whose **explicitly-annotated** return type is a sentinel (`Optional[T]`, `T | None`) *used as the error signal* — see the sentinel caveat below.
+- **Async unwrapping:** before classifying, unwrap `Awaitable[X]` / `Coroutine[..., X]` (and `async def` returns) so `Awaitable[Result[T]]` / `Optional[T]` from coroutines are bucketed by their inner type rather than skipped.
+- **Sentinel caveat:** `Optional[T]` / `T | None` is often a legitimate "not found" rather than an error. v1 counts it as the `sentinel` variant only with a corroborating signal (e.g. function name, or a sibling raising variant); otherwise it is reported separately as *ambiguous* and **not** counted as a deviation, to avoid inflating the inconsistency number.
+- **Classification:** each instance is bucketed into one of three variants — `exception`, `result-type`, `sentinel` — and attributed to its enclosing function/file. **Mixed functions** (e.g. `raise` for programmer errors *and* a `Result`/`None` return for expected failures) are labeled `mixed` rather than force-fit into one bucket.
+- **Detection engine (v1):** classification is **tree-sitter-only**, so it is scoped to *syntactically visible* types — **explicitly-annotated** return types (function annotations) and recognized type names. Unannotated functions and aliases requiring cross-file resolution are out of scope for v1 (see [08-risks-and-scope.md](08-risks-and-scope.md)).
 - **Human-confirm step:** the audit *proposes* the dominant convention; the user confirms or overrides it in one step before any plan is generated. This converts the riskiest LLM classification into a cheap confirmation and prevents downstream errors from propagating into the plan/execution.
 - **Output:** a report — proposed dominant variant (pending confirmation), % adoption, list of deviating files with file:line references.
 
 ## 5.2 Refactor Plan
 - **Input:** confirmed audit report.
-- **v1 "call site" contract:** a call site is a *direct, same-language reference* — i.e. an `import`/`require` of the changed symbol plus a direct `call_expression` against it. Explicitly out of scope for v1: dynamic dispatch, re-exports/barrel files, runtime string-keyed access, and cross-language boundaries. These are known false-negative sources and are framed honestly rather than claimed as solved.
+- **v1 "call site" contract:** a call site is a *direct, same-language reference* — i.e. an `import` / `from … import` of the changed symbol plus a direct `call` against it. Explicitly out of scope for v1: dynamic dispatch, `__getattr__`/`getattr` string-keyed access, re-exports via `__init__.py`, monkeypatching, and cross-language boundaries. These are known false-negative sources and are framed honestly rather than claimed as solved.
 - **Process:** for each deviating file, identify call sites / dependents (AST symbol search, grep fallback) to determine safe ordering — files with fewer external dependents go first.
 - **Output:** an ordered task list, one entry per file, with associated call-site list.
 

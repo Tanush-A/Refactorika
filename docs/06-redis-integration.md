@@ -16,7 +16,7 @@ The Redis track judging criteria specifically calls out using Iris for agent mem
   - Context Retriever's model is typed, chainable tool calls over structured data rather than one-shot vector retrieval — exactly the shape these two MCP tools already need.
   - Define structured lookups (e.g. "all call sites for function X," "current dominant convention for pattern Y") as Context Retriever tools. The agent calls them mid-refactor the same way it would call any other MCP tool, and the retrieval logic doesn't have to be hand-rolled.
 - **Redis LangCache → audit efficiency**
-  - The audit step makes repeated classification calls across files ("does this file use exceptions or `Result<T>`?"). LangCache caches these — keyed on the *normalized AST signature* of the construct, **not** loose semantic similarity, to avoid false cache hits that would corrupt audit accuracy.
+  - The audit step makes repeated classification calls across files ("does this function raise, return a `Result`, or return `None`?"). LangCache caches these — keyed on the *normalized AST signature* of the construct, **not** loose semantic similarity, to avoid false cache hits that would corrupt audit accuracy.
   - This becomes a clean, legitimate "Redis beyond caching" story: caching is one piece, not the whole pitch — agent memory and context retrieval do the structural work.
 - **Vector search (underlying both Agent Memory and Context Retriever) — [Reach]**
   - v1's three fixed, AST-detectable variants are matched *exactly* (more accurate than fuzzy matching here). Semantic vector matching becomes useful only once many convention types exist; it is a Reach capability, not an Initial dependency.
