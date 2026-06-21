@@ -39,7 +39,12 @@ python3 -m venv .venv
 # Apply in place (commits each verified edit to git):
 .venv/bin/refactorika demo_repo --apply
 
-# Add LLM judgment (god-function decomposition with consistent naming); needs ANTHROPIC_API_KEY:
+# Reference-correct rename across the whole repo (the centerpiece) — deterministic:
+.venv/bin/refactorika demo_repo --rename orders.compute_total=calculate_order_total
+
+# Add LLM judgment: god-function decomposition with consistent naming via decision memory.
+# The first run with ANTHROPIC_API_KEY records responses to .refactorika/llm_cache.json;
+# subsequent runs replay that cache offline (no key needed).
 .venv/bin/refactorika demo_repo --llm
 
 # Tests (offline — no Redis, no API key needed):

@@ -36,8 +36,11 @@ class LLMClient:
 
     # ------------------------------------------------------------------ public
     def available(self) -> bool:
-        """True if the LLM can produce a *new* answer (key present), or we have a stub."""
-        return bool(self.stub) or bool(os.environ.get("ANTHROPIC_API_KEY"))
+        """True if the LLM can answer: a stub, a non-empty replay cache, or an API key.
+
+        Counting a populated cache means a pre-baked (recorded) cache replays fully offline —
+        the demo shows the LLM beats with no key set."""
+        return bool(self.stub) or bool(self._cache) or bool(os.environ.get("ANTHROPIC_API_KEY"))
 
     def complete_json(self, system: str, prompt: str) -> Optional[dict]:
         """Return a parsed JSON object from the model, or None if unavailable.

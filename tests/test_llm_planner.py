@@ -124,6 +124,54 @@ def test_llm_decomposition_flows_through_gates_and_commits(tmp_path):
     assert res.finale_tests is True  # behavior preserved end to end
 
 
+def test_consistency_beat_fires_on_the_real_demo_functions(tmp_path):
+    """The Redis decision-memory beat, on demo_repo's actual near-duplicates: compute_total
+    and calculate_invoice_total are structurally identical, so decomposing the second recalls
+    the first's helper names. Proven offline via a stub (no API key)."""
+    import shutil
+    from pathlib import Path as _P
+
+    from refactorika.core.schema import RefactorDecision
+    from refactorika.llm.client import LLMClient
+    from refactorika.pipeline.planner_llm import (
+        _SYSTEM,
+        _decompose_prompt,
+        _god_functions,
+        _shape_pattern,
+    )
+
+    demo = _P(__file__).resolve().parent.parent / "demo_repo"
+    target = tmp_path / "demo_repo"
+    shutil.copytree(demo, target, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+    g = build_graph(str(target))
+
+    # A stub that returns a (name-agnostic) decomposition for each function, both prompt
+    # variants (with and without a recalled prior), all using the same helper names.
+    helper_names = ["_line_amount", "_apply_coupon"]
+    model = LLMClient().model
+    stub = {}
+    for qual, source in _god_functions(g, str(target)):
+        resp = {"new_source": source, "helper_names": helper_names, "rationale": "split"}
+        prior = RefactorDecision(pattern=_shape_pattern(source),
+                                 transform_kind="decompose_function",
+                                 target="x", choice={"helper_names": helper_names})
+        for p in (_decompose_prompt(source, None), _decompose_prompt(source, prior)):
+            stub[stub_key(model, _SYSTEM, p)] = resp
+
+    memory = AgentMemory(Storage(redis_url=None, json_path=tmp_path / "s.json"))
+    planner = make_llm_planner(client=LLMClient(stub=stub), memory=memory)
+    plan = planner(g, root=str(target))
+
+    decompose = [it for it in plan.items if it.spec.kind == "decompose_function"]
+    targets = {it.spec.target for it in decompose}
+    assert {"orders.compute_total", "billing.calculate_invoice_total"} <= targets
+    # exactly one of the two carries the "consistent with prior" note — the recall fired
+    assert sum("consistent" in it.spec.rationale for it in decompose) >= 1
+    # the shared shape recorded the same helper names for both
+    shape = _shape_pattern(_god_functions(g, str(target))[0][1])
+    assert memory.get_decision(shape).choice["helper_names"] == helper_names
+
+
 def test_decision_memory_makes_naming_consistent(tmp_path):
     # Two identical-shape functions in different modules.
     (tmp_path / "a.py").write_text(_GOD)
