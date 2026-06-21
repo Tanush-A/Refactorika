@@ -3,6 +3,7 @@ eval/external/
 
 # Eval virtualenv (created by eval/run_eval.sh)
 eval/.venv/
+eval/results/
 
 # Python
 __pycache__/

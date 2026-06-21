@@ -19,12 +19,52 @@ make eval-no-fetch # run using already-fetched data (no re-clone)
 make help          # list all targets
 ```
 
+## Controlled harness benchmark
+
+The headline benchmark is a paired OFF-vs-ON ablation over ten multi-file
+error-handling conversions. The harness sees `tests/gate`; the independent
+grader injects `tests/oracle` only after the final patch has landed. An oracle
+failure therefore cannot be repaired by reading or overfitting to held-out tests.
+
+First validate all reference controls:
+
+```bash
+make benchmark       # 10 good + 40 bad controls; must report 50/50
+```
+
+Then run Sonnet 4.5 through Anthropic (`ANTHROPIC_API_KEY` in `.env`):
+
+```bash
+make benchmark-agent
+TRIALS=1 MODEL=claude-sonnet-4-5-20250929 make benchmark-agent
+INPUT_COST_PER_MTOK=3 OUTPUT_COST_PER_MTOK=15 MODEL=my-model make benchmark-agent
+```
+
+For Ollama, LM Studio, or vLLM, set `PROVIDER=openai`, `MODEL`, and `BASE_URL`.
+
+For a two-task pilot, call the module directly:
+
+```bash
+eval/.venv/bin/python -m eval.harness_bench --provider openai \
+  --task withdraw --task reserve --trials 1
+```
+
+Each pair shares the exact initial model proposal. OFF writes that patch raw.
+ON routes it through atomic parse, lint, type, and visible-test gates, then gives
+gate feedback for at most two retries before `skipped-needs-human`. Results are
+written to `eval/results/harness-latest.json` and include raw patches, token/time
+usage, regressions shipped, catch rate, false rejection, escalation, and a paired
+bootstrap confidence interval. Reference-control runs are plumbing checks and
+must not be presented as model performance.
+
 No `make`? Call the script directly: `bash eval/run_eval.sh`.
 
 ## Layout
 
 - `run_eval.sh` — one-command runner: venv + deps + fetch + driver. Idempotent.
 - `run_eval.py` — eval driver (curated-repo eval + RefactorBench smoke check; external-slice adapter is stubbed until the harness exists).
+- `harness_bench.py` — calibrated paired harness benchmark and model adapter.
+- `harness_tasks.py` — ten controlled tasks plus reference-good/bad patches.
 - `requirements.txt` — eval dependencies (tree-sitter, pyright, ruff, pytest).
 - `fetch_benchmarks.sh` — clones external benchmark data into `external/` (gitignored).
 - `external/` — **gitignored.** Fetched benchmark data (RefactorBench). Never committed (mixed/GPL upstream licenses).
