@@ -89,6 +89,7 @@ This is what powers incremental `generate_docs` (retrieve last context → diff 
 |---|---|
 | `analyze_file` | LangCache (skip re-parse) |
 | `find_duplicates` | AST-keyed cache (tier 1) + Hybrid Search Index (tier 2: BM25 ⊕ vector) |
+| `find_related` | Hybrid Search Index (semantic neighbours = impact) + call graph (dependents) |
 | `find_dead_code` | Agent Memory (prior call-graph), Context Retriever (dependents) |
 | `generate_docs` | Agent Memory (prior context, incremental diff) + Context Retriever |
 | `get_context_map` | Agent Memory + Context Retriever |

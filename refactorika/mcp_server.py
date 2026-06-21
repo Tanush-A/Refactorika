@@ -8,6 +8,7 @@ from .analysis.audit import audit_repo as _audit_repo
 from .analysis.audit import build_plan as _build_plan
 from .analysis.dead_code import find_dead_code as _find_dead_code
 from .analysis.duplicates import find_duplicates as _find_duplicates
+from .analysis.related import find_related as _find_related
 from .core.analyze import analyze_file as _analyze_file
 from .core.apply import apply_and_verify as _apply_and_verify
 from .core.apply import apply_and_verify_multi as _apply_and_verify_multi
@@ -42,6 +43,19 @@ def find_duplicates(path: str, threshold: float = 0.83) -> dict:
     Returns ranked pairs with consolidation targets. Claude proposes the merge via apply_and_verify.
     """
     return _find_duplicates(path, _storage, _vector_index, threshold)
+
+
+@mcp.tool()
+def find_related(path: str, symbol: str = "", k: int = 5) -> dict:
+    """Impact check: what else does changing this file affect? (read-only, advisory)
+
+    Returns (a) `related` — functions ELSEWHERE in the repo that are semantically
+    similar (hybrid vector search), i.e. parallel/duplicated logic a behavior
+    change here probably needs mirrored; and (b) `dependents` — modules that
+    directly import/call this one (call graph). Use before refactoring to avoid
+    fixing one copy and missing the others.
+    """
+    return _find_related(path, _storage, _vector_index, k=k, symbol=symbol)
 
 
 @mcp.tool()
@@ -105,7 +119,7 @@ def audit_repo(path: str) -> dict:
 
 @mcp.tool()
 def get_plan(path: str) -> dict:
-    """Dependency-ordered refactor plan (fewest-dependents-first); persists it (read-only, advisory).
+    """Dependency-ordered refactor plan (fewest-dependents-first); persists it (advisory).
 
     Orders deviating files low-blast-radius-first so later edits land on stable
     ground. The plan is saved as the current plan for confirm_plan to gate.

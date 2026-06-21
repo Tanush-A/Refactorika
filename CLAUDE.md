@@ -12,7 +12,7 @@
 - **Target user:** a dev with a small/medium/legacy/AI-slop Python project who wants mechanical cleanup done *safely* — not by hand, not by trusting an agent blind.
 
 ## Two tool classes (everything is one or the other)
-- **Advisory (read-only — finds + explains):** `analyze_file` · `find_duplicates` · `find_dead_code` · `generate_docs` · `get_context_map` · `get_log`. Surface ranked opportunities + memory; feed Claude's next proposal.
+- **Advisory (read-only — finds + explains):** `analyze_file` · `find_duplicates` · `find_related` · `find_dead_code` · `generate_docs` · `get_context_map` · `audit_repo`/`get_plan`/`confirm_plan` (v3) · `get_log`. Surface ranked opportunities + memory; feed Claude's next proposal. `find_related` = impact check: hybrid-search the repo for semantically-similar code (+ call-graph dependents) before changing a file, so you don't fix one copy and miss the others.
 - **Verified mutation (gated — single atomic entrypoint):** `apply_and_verify(path, new_content, refactor_kind)`. Every structural edit goes through it — `refactor_kind` includes `consolidate_duplicate` / `remove_dead_code`, so "find dead code" becomes "**safely remove** it, proven by your tests."
 
 ## The core flow (golden path — must always work)
