@@ -19,9 +19,37 @@ make eval-no-fetch # run using already-fetched data (no re-clone)
 make help          # list all targets
 ```
 
-## Controlled harness benchmark
+## Full-system benchmark
 
-The headline benchmark is a paired OFF-vs-ON ablation over ten multi-file
+This is the product-level comparison. Both arms start from separate copies of
+the same case repository and receive the exact initial user request
+`refactor this codebase`:
+
+- **OFF** asks the model to inspect the repository and create its own plan, then
+  makes a separate model call to produce the patch from that plan.
+- **ON** has Refactorika audit the repository and build a dependency-ordered,
+  architecture-aware prompt. The model proposes an independent patch, which is
+  routed through atomic gates and up to two diagnostic-guided repairs.
+
+The grader then injects hidden tests and independently checks the intended
+structure. Hidden tests and case expectations are never included in either
+agent prompt.
+
+```bash
+make benchmark-full-calibrate
+TRIALS=1 MODEL=claude-sonnet-4-5-20250929 make benchmark-full-agent
+```
+
+The nine cases cover behavior traps, multi-file call sites and compatibility,
+and verification/recovery failures. Results are written to
+`eval/results/full-system-latest.json`.
+
+See [../docs/13-full-system-benchmark.md](../docs/13-full-system-benchmark.md)
+for the full experimental contract.
+
+## Shared-patch verification ablation
+
+This narrower mechanism test is a paired OFF-vs-ON ablation over ten multi-file
 error-handling conversions. The harness sees `tests/gate`; the independent
 grader injects `tests/oracle` only after the final patch has landed. An oracle
 failure therefore cannot be repaired by reading or overfitting to held-out tests.
@@ -65,6 +93,8 @@ No `make`? Call the script directly: `bash eval/run_eval.sh`.
 - `run_eval.py` — eval driver (curated-repo eval + RefactorBench smoke check; external-slice adapter is stubbed until the harness exists).
 - `harness_bench.py` — calibrated paired harness benchmark and model adapter.
 - `harness_tasks.py` — ten controlled tasks plus reference-good/bad patches.
+- `full_system_bench.py` — independent-agent full-system benchmark runner.
+- `full_system_cases/` — nine hidden-oracle full-system case repositories.
 - `requirements.txt` — eval dependencies (tree-sitter, pyright, ruff, pytest).
 - `fetch_benchmarks.sh` — clones external benchmark data into `external/` (gitignored).
 - `external/` — **gitignored.** Fetched benchmark data (RefactorBench). Never committed (mixed/GPL upstream licenses).

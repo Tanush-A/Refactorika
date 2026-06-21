@@ -92,8 +92,10 @@ def _resolve_edits(repo: Path, edits: dict[str, str]) -> dict[str, Path]:
             raise ValueError(f"edit escapes repository: {relative}") from exc
         if candidate.suffix != ".py":
             raise ValueError(f"only Python edits are supported: {relative}")
-        if not candidate.is_file():
-            raise ValueError(f"edited file does not exist: {relative}")
+        if candidate.exists() and not candidate.is_file():
+            raise ValueError(f"edited path is not a file: {relative}")
+        if not candidate.parent.is_dir():
+            raise ValueError(f"parent directory does not exist: {relative}")
         resolved[relative] = candidate
     if not resolved:
         raise ValueError("at least one edit is required")
@@ -136,16 +138,19 @@ def verify_edits(
 
     root = Path(repo).resolve()
     paths = _resolve_edits(root, edits)
-    originals = {rel: path.read_text() for rel, path in paths.items()}
+    originals = {rel: path.read_text() if path.is_file() else None for rel, path in paths.items()}
     record = VerificationRecord(
         files=sorted(paths),
-        diff="\n".join(_diff(rel, originals[rel], edits[rel]) for rel in sorted(paths)),
+        diff="\n".join(_diff(rel, originals[rel] or "", edits[rel]) for rel in sorted(paths)),
         retries=retries,
     )
 
     def reject(gate: str, reason: str) -> VerificationRecord:
         for rel, path in paths.items():
-            path.write_text(originals[rel])
+            if originals[rel] is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_text(originals[rel])
         record.status = "rolled-back"
         record.failure_reason = f"{gate}: {reason}"
         record.gate_details[gate] = reason
@@ -158,10 +163,13 @@ def verify_edits(
         return reject("parse", detail)
 
     relative_paths = sorted(paths)
+    existing_paths = sorted(rel for rel, original in originals.items() if original is not None)
     ruff = _tool("ruff")
     baselines: int | None = None
     if ruff:
-        baselines, detail = _ruff_count(ruff, root, relative_paths)
+        baselines, detail = (
+            _ruff_count(ruff, root, existing_paths) if existing_paths else (0, "0 violation(s)")
+        )
         if baselines is None:
             record.checks.lint = False
             return reject("lint", detail)
@@ -194,11 +202,28 @@ def verify_edits(
         else:
             result = _run([pyright, "--outputjson"], root, timeout)
             try:
-                errors = int(json.loads(result.stdout).get("summary", {}).get("errorCount", 0))
+                pyright_output = json.loads(result.stdout)
+                errors = int(pyright_output.get("summary", {}).get("errorCount", 0))
             except (ValueError, TypeError, json.JSONDecodeError):
                 return reject("typecheck", "pyright returned invalid JSON")
             record.checks.typecheck = errors == 0
-            record.gate_details["typecheck"] = f"{errors} error(s)"
+            diagnostics = []
+            for diagnostic in pyright_output.get("generalDiagnostics", []):
+                if diagnostic.get("severity") != "error":
+                    continue
+                file = diagnostic.get("file", "unknown file")
+                try:
+                    file = str(Path(file).resolve().relative_to(root))
+                except ValueError:
+                    pass
+                start = diagnostic.get("range", {}).get("start", {})
+                line = int(start.get("line", 0)) + 1
+                message = " ".join(str(diagnostic.get("message", "type error")).split())
+                diagnostics.append(f"{file}:{line}: {message}")
+            detail = f"{errors} error(s)"
+            if diagnostics:
+                detail += "; " + " | ".join(diagnostics[:8])
+            record.gate_details["typecheck"] = detail
             if errors:
                 return reject("typecheck", record.gate_details["typecheck"])
 

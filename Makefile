@@ -1,4 +1,5 @@
-.PHONY: help setup fetch eval eval-no-fetch benchmark benchmark-agent test clean-eval
+.PHONY: help setup fetch eval eval-no-fetch benchmark benchmark-agent \
+	benchmark-full-calibrate benchmark-full-agent test clean-eval
 
 help:  ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -17,11 +18,11 @@ eval:  ## Full evaluation: setup -> fetch benchmarks -> run
 eval-no-fetch:  ## Run evaluation using already-fetched benchmark data
 	bash eval/run_eval.sh --no-fetch
 
-benchmark:  ## Validate all 50 harness benchmark calibration controls
+benchmark:  ## Calibrate the shared-patch verification ablation
 	@test -x eval/.venv/bin/python || bash eval/run_eval.sh --setup
 	PATH="$(CURDIR)/eval/.venv/bin:$$PATH" eval/.venv/bin/python -m eval.harness_bench --calibrate-only
 
-benchmark-agent:  ## Run 10 tasks x 3 trials against an OpenAI-compatible endpoint
+benchmark-agent:  ## Run the shared-patch verification ablation
 	@test -x eval/.venv/bin/python || bash eval/run_eval.sh --setup
 	PATH="$(CURDIR)/eval/.venv/bin:$$PATH" eval/.venv/bin/python -m eval.harness_bench \
 		--provider "$${PROVIDER:-anthropic}" \
@@ -29,6 +30,20 @@ benchmark-agent:  ## Run 10 tasks x 3 trials against an OpenAI-compatible endpoi
 		--base-url "$${BASE_URL:-http://localhost:11434/v1}" --trials "$${TRIALS:-3}" \
 		--input-cost-per-mtok "$${INPUT_COST_PER_MTOK:-0}" \
 		--output-cost-per-mtok "$${OUTPUT_COST_PER_MTOK:-0}"
+
+benchmark-full-calibrate:  ## Validate the nine full-system case baselines
+	@test -x eval/.venv/bin/python || bash eval/run_eval.sh --setup
+	PATH="$(CURDIR)/eval/.venv/bin:$$PATH" eval/.venv/bin/python \
+		-m eval.full_system_bench --calibrate-only
+
+benchmark-full-agent:  ## Run independent harness OFF-vs-ON full-system agents
+	@test -x eval/.venv/bin/python || bash eval/run_eval.sh --setup
+	PATH="$(CURDIR)/eval/.venv/bin:$$PATH" eval/.venv/bin/python \
+		-m eval.full_system_bench \
+		--provider "$${PROVIDER:-anthropic}" \
+		--model "$${MODEL:-claude-sonnet-4-5-20250929}" \
+		--base-url "$${BASE_URL:-http://localhost:11434/v1}" \
+		--trials "$${TRIALS:-3}" --max-retries "$${MAX_RETRIES:-2}"
 
 test:  ## Run harness and benchmark unit tests
 	@test -x eval/.venv/bin/python || bash eval/run_eval.sh --setup

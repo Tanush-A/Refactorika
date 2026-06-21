@@ -48,18 +48,20 @@ tests/              unit tests
 Scope is deliberately narrow (v1): simple Python codebases, behavior-preserving refactors only.
 See `CLAUDE.md` for the full project memory and `docs/` for problem/scope/stack detail.
 
-## Harness benchmark
+## Benchmarks
 
-Validate the controlled benchmark's 50 reference controls:
+Run the full-system benchmark in which both independent agents receive only
+`refactor this codebase` as the initial user request:
+
+```bash
+make benchmark-full-calibrate
+MODEL=claude-sonnet-4-5-20250929 make benchmark-full-agent
+```
+
+The older shared-patch verification ablation remains available separately:
 
 ```bash
 make benchmark
-```
-
-Run the paired Sonnet 4.5 harness OFF-vs-ON benchmark:
-
-```bash
-MODEL=claude-sonnet-4-5-20250929 make benchmark-agent
 ```
 
 See [eval/README.md](eval/README.md) for the methodology and result fields.

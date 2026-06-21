@@ -51,6 +51,8 @@ def test_nullable_return_is_classified_as_targeted_type_repair(tmp_path: Path) -
     assert record.checks.typecheck is False
     assert record.failure_reason is not None
     assert record.failure_reason.startswith("typecheck:")
+    assert "app/catalog.py" in record.gate_details["typecheck"]
+    assert "int | None" in record.gate_details["typecheck"]
     assert case.expected_gate == "typecheck"
     assert "app/catalog.py" in case.expected_diagnostics
     assert all((repo / path).read_text() == content for path, content in originals.items())

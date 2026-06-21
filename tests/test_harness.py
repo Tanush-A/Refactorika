@@ -67,3 +67,26 @@ def test_rejects_path_escape(tmp_path: Path) -> None:
         assert "escapes repository" in str(exc)
     else:
         raise AssertionError("path escape accepted")
+
+
+def test_new_python_file_is_supported_and_removed_on_rollback(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    created = repo / "helper.py"
+
+    green = verify_edits(
+        repo, {"helper.py": "def doubled(value: int) -> int:\n    return value * 2\n"}
+    )
+    assert green.status == "committed"
+    assert created.is_file()
+
+    created.unlink()
+    rejected = verify_edits(
+        repo,
+        {
+            "helper.py": "def doubled(value: int) -> int:\n    return value * 2\n",
+            "app.py": "def value() -> int:\n    return -1\n",
+        },
+        required_gates=("tests",),
+    )
+    assert rejected.status == "rolled-back"
+    assert not created.exists()
