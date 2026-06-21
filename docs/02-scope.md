@@ -1,44 +1,56 @@
 # Scope
 
-## v1 — Initial Scope
+Refactorika targets **small-to-medium Python codebases** — single-package projects and small multi-file/multi-package repos where structure is shallow enough to reason about with static analysis. The product is one coherent harness; the capabilities below ship as one system, sequenced by the build order at the bottom.
 
-Refactorika v1 targets **simple Python codebases**: single-package projects or small multi-file scripts where the structure is shallow and the logic is self-contained.
+## The non-negotiable invariant
 
-### In Scope
+**A refactor changes shape, not behavior.** Every *mutating* action is proven behavior-preserving by the gate stack (`parse → ruff → pyright → pytest`) before it commits, and rolled back atomically on any failure. This is the whole trust angle — it holds for every kind of edit, including duplicate consolidation and dead-code removal.
 
-**Organization improvements**
-- Splitting large files into logically grouped modules
-- Reordering and deduplicating imports (stdlib → third-party → local)
-- Extracting reusable helper functions from bloated call sites
+## In Scope
 
-**Complexity reductions**
-- Breaking up long functions into smaller, named units
-- Flattening deeply nested conditionals (early returns, guard clauses)
-- Replacing repetitive code blocks with extracted, parameterized functions
+Two classes of capability work together: **advisory** tools that find and explain (read-only), and **verified mutations** that fix (gated). Advisory tools surface opportunities → Claude proposes a concrete edit → the mutation entrypoint proves it safe and commits.
 
-### Out of Scope (v1)
+**Organization (verified mutation)**
+- Split large files into logically grouped modules.
+- Reorder and deduplicate imports (stdlib → third-party → local).
+- Extract reusable helpers from bloated call sites.
 
-- Multi-language support (JavaScript, TypeScript, Go, etc.)
-- Large-scale architectural rewrites (e.g., monolith → microservices)
-- Changes that alter runtime behavior or public API contracts
-- Test generation or test coverage improvements
-- Dependency management or `pyproject.toml` changes
+**Complexity (verified mutation)**
+- Break long functions into smaller, named units.
+- Flatten deeply nested conditionals (early returns, guard clauses).
+- Replace repeated blocks with extracted, parameterized functions.
 
-## Future Scope (v2)
+**Duplicate & dead code (advisory → verified mutation)**
+- **Detect** semantic + structural duplicates (`find_duplicates`) and unreachable symbols (`find_dead_code`), each ranked with a confidence score. Never auto-delete — always surface first.
+- **Consolidate / remove** the confirmed ones as ordinary verified mutations: Claude proposes the deletion or merge, and `pytest` *proves* nothing breaks before it lands. We don't just *find* dead code — we *safely remove* it, proven by your own tests.
 
-The following are committed v2 capabilities, built on Redis Iris for agent memory, vector search, and context retrieval. See [05-v2-features.md](05-v2-features.md) for the full spec.
+**Context & documentation (advisory + memory)**
+- Generate and self-update `.refactorika/context/<module>.md` (`generate_docs`) capturing purpose, key exports, dependents, and the architectural decisions/workarounds embedded in the code.
+- Persist that knowledge to Redis Iris agent memory so it accumulates across sessions and survives team turnover (`get_context_map`).
 
-**Context & Documentation Generation**
-- AI-generated, self-updating module documentation — Refactorika reads the codebase and emits `.refactorika/context/<module>.md` files capturing purpose, key exports, and architectural decisions.
+## Out of Scope
 
-**Duplicate & Dead Code Detection**
-- Semantic duplicate detection via vector search: embed each function's normalized AST signature, store in a Redis vector index, query by cosine similarity to surface functions with the same logic under different names.
-- Dead code analysis via graph-based reachability: build a call graph from the AST, mark entry points, BFS/DFS to flag symbols unreachable from production traffic.
+- Multi-language support (JavaScript, TypeScript, Go, etc.) — **Python only**.
+- Large-scale architectural rewrites (e.g., monolith → microservices).
+- **Any mutation that alters runtime behavior or a public API contract** — the invariant above, full stop.
+- Test generation or coverage improvements (we *run* your tests as the safety net; we don't write them).
+- Dependency management or `pyproject.toml` edits.
 
-**New MCP tools (v2):** `generate_docs(path)`, `find_duplicates(path)`, `find_dead_code(path)`, `get_context_map(path)`.
+## Exploratory (not now)
 
-## Exploratory (beyond v2)
+- Large multi-package monorepos with deep package hierarchies.
+- Framework-aware refactoring (Django, FastAPI request/response patterns).
+- Additional language targets.
+- Vector search tuned per-team on private embedding models.
 
-- Support for larger, multi-package Python projects
-- Framework-aware refactoring (e.g., Django, FastAPI patterns)
-- Additional language targets
+## Build order (value-per-hour)
+
+The harness is built as a vertical slice first, then broadened. Each step is demoable on its own.
+
+1. **Verified-refactor loop** *(foundation, shipped)* — `analyze_file → apply_and_verify → commit/rollback` on a curated repo, one refactor kind end-to-end, gate stack green. This is the trust spine everything else hangs off.
+2. **Duplicate detection** — highest demo impact; reuses the existing tree-sitter AST work. Add structural fingerprinting + the Redis vector index. Consolidation rides the existing gate stack.
+3. **Dead-code analysis + verified removal** — graph-based reachability; independent of the embedding pipeline, can be built in parallel. Removal rides the gate stack.
+4. **Cross-session memory + living docs** — promote storage to full Redis Iris (agent memory + context retriever); `generate_docs` builds on retrievable prior context.
+
+See [05-redis-iris.md](05-redis-iris.md) for the memory layer and [04-architecture.md](04-architecture.md) for the tool surface.
+</content>

@@ -1,109 +1,134 @@
 # Architecture
 
+Refactorika is **one interface-agnostic core library** wrapped in a **thin MCP shell**. The core holds all logic — analysis, the gate stack, transforms, Redis Iris memory — and reads/writes state itself, so every entry point (the MCP server, the demo script, the tests) sees the same thing. Claude proposes; the core verifies and remembers.
+
 ## Project Layout
+
+The canonical package is the top-level **`refactorika/`**. Modules marked *(exists)* are shipped today; *(to build)* are on the build order in [02-scope.md](02-scope.md).
 
 ```
 Refactorika/
-├── pyproject.toml                        # package metadata + dependencies
-├── src/
-│   └── refactorika/
-│       ├── __init__.py
-│       ├── server.py                     # FastMCP instance + entry point
-│       ├── tools/
-│       │   ├── __init__.py
-│       │   ├── split_file.py             # tool: split large file into modules
-│       │   ├── imports.py                # tool: deduplicate + reorder imports
-│       │   ├── extract.py                # tool: extract helpers from long functions
-│       │   └── flatten.py                # tool: flatten nested conditionals
-│       ├── analysis/
-│       │   ├── __init__.py
-│       │   ├── parser.py                 # tree-sitter AST parsing
-│       │   └── metrics.py                # complexity scoring (nesting depth, fn length)
-│       ├── transforms/
-│       │   ├── __init__.py
-│       │   └── rewrite.py                # apply AST edits + serialize back to source
-│       └── cache.py                      # Redis client + result caching helpers
-└── tests/
-    ├── __init__.py
-    ├── test_imports.py
-    ├── test_extract.py
-    ├── test_flatten.py
-    └── test_split_file.py
+├── pyproject.toml                  # package metadata + dependencies
+├── refactorika/                    # ← the package (interface-agnostic core + thin shell)
+│   ├── __init__.py
+│   ├── mcp_server.py               # FastMCP shell: registers every tool          (exists)
+│   ├── dashboard.py                # renders the edit log — visible verification   (exists)
+│   ├── core/
+│   │   ├── schema.py               # frozen contracts: Opportunity, EditRecord…    (exists)
+│   │   ├── analyze.py              # structure analysis → ranked opportunities     (exists)
+│   │   ├── apply.py                # apply_and_verify: the atomic mutation heart   (exists)
+│   │   ├── gates.py                # parse → ruff → pyright → pytest               (exists)
+│   │   └── storage.py              # Redis Iris client + local-JSON fallback       (exists)
+│   ├── analysis/
+│   │   ├── duplicates.py           # structural fingerprint + semantic pairing     (to build)
+│   │   ├── dead_code.py            # call-graph reachability + confidence          (to build)
+│   │   ├── embeddings.py           # local/OpenAI embedding generation             (to build)
+│   │   └── call_graph.py           # directed symbol graph builder                 (to build)
+│   ├── memory/                     # Redis Iris wrappers (generalize storage.py)
+│   │   ├── agent_memory.py         # cross-session module context + history        (to build)
+│   │   ├── vector_index.py         # per-function embeddings + cosine queries       (to build)
+│   │   └── context.py              # Context Retriever (structured + vector)        (to build)
+│   └── docs_gen.py                 # generate_docs / context-map emission          (to build)
+├── demo_repo/                      # curated messy target repo + its tests         (exists)
+├── scripts/demo.py                 # scripted golden-path walkthrough              (exists)
+└── tests/                          # unit tests                                    (exists)
 ```
+
+> **Note — one tree only.** An earlier skeleton lived under `src/refactorika/` (`server.py`, `tools/*.py` stubs). That tree is **abandoned and slated for deletion**; do not add to it. All code lives under top-level `refactorika/`, and `pyproject.toml` should package that path.
 
 ## MCP Framework
 
-Refactorika uses the **`mcp` Python SDK** with `FastMCP` — a decorator-based API similar to FastAPI.
+Refactorika uses the **`mcp` Python SDK** with `FastMCP`. The shell wraps the core 1:1 — each tool is a thin function that calls a core entrypoint and returns a JSON-serializable result.
 
-**Entry point** (`src/refactorika/server.py`):
 ```python
+# refactorika/mcp_server.py  (excerpt — exists today)
 from mcp.server.fastmcp import FastMCP
-from refactorika.tools import split_file, imports, extract, flatten
+from .core.analyze import analyze_file as _analyze_file
+from .core.apply import apply_and_verify as _apply_and_verify
+from .core.storage import Storage
 
 mcp = FastMCP("refactorika")
+_storage = Storage()
+
+@mcp.tool()
+def analyze_file(path: str) -> dict:
+    """Ranked structural-refactor opportunities for a Python file (read-only)."""
+    return _analyze_file(path, _storage).to_dict()
 ```
 
-**Defining a tool** (each file under `tools/`):
-```python
-from mcp.server.fastmcp import FastMCP
+## The two tool classes
 
-router = FastMCP("imports")
+Everything the harness exposes is either **advisory** (read-only — finds and explains) or a **verified mutation** (gated — changes code only if proven safe). Advisory output feeds Claude's reasoning; Claude then proposes a concrete edit that goes through the single mutation entrypoint.
 
-@router.tool()
-def organize_imports(file_path: str) -> str:
-    """Deduplicates and reorders imports: stdlib → third-party → local."""
-    ...
-```
+### Advisory tools (read-only, never mutate)
 
-Claude calls tools by name during a conversation. All parameters and return values must be JSON-serializable. Return a string with the refactored source or a structured result.
-
-## Data Flow
-
-```
-Claude invokes tool
-    └── server.py (FastMCP)
-            └── tools/*.py          ← validate input, call analysis + transforms
-                    ├── analysis/parser.py     ← parse source to AST (tree-sitter)
-                    ├── analysis/metrics.py    ← score complexity
-                    ├── transforms/rewrite.py  ← apply edits, serialize to source
-                    └── cache.py               ← cache result in Redis by file hash
-```
-
-## Layer Responsibilities
-
-| Layer | Files | Responsibility |
+| Tool | Description | Status |
 |---|---|---|
-| MCP server | `server.py` | Registers tools with FastMCP; entry point for `mcp dev` |
-| Tools (v1) | `tools/*.py` | One file per refactoring capability; thin orchestration |
-| Tools (v2) | `tools/docs.py`, `tools/duplicates.py`, `tools/dead_code.py` | v2 capabilities: doc generation, duplicate detection, dead code analysis |
-| Analysis | `analysis/parser.py`, `analysis/metrics.py` | Read-only: parse + score source, never write |
-| Analysis (v2) | `analysis/embeddings.py`, `analysis/call_graph.py` | Embedding generation; graph-based reachability for dead code |
-| Transforms | `transforms/rewrite.py` | Write-only: take an AST + edit spec, return new source |
-| Cache | `cache.py` | Redis Iris (Agent Memory, Vector Index, Context Retriever, LangCache) + local JSON fallback |
+| `analyze_file(path)` | Ranked structural smells: file size, import order/dupes, function length, nesting depth | exists |
+| `find_duplicates(path)` | Structural fingerprint + semantic vector search; ranked pairs of duplicate functions with a consolidation target | to build |
+| `find_dead_code(path)` | Call-graph reachability; unreachable symbols with a confidence score | to build |
+| `generate_docs(path)` | Generate/update `.refactorika/context/<module>.md` (purpose, exports, dependents, decisions) | to build |
+| `get_context_map(path)` | Module context summary pulled from Redis agent memory | to build |
+| `get_log()` | The append-only edit log (powers the dashboard) | exists |
 
-## v2 MCP Tools
+### Verified mutation (single atomic entrypoint, gated)
 
-| Tool | Description |
-|---|---|
-| `generate_docs(path)` | Generate or update `.refactorika/context/<module>.md` for a file or directory |
-| `find_duplicates(path)` | Vector search over AST embeddings; returns ranked pairs of semantically similar functions |
-| `find_dead_code(path)` | Graph-based reachability; returns unreachable symbols with a confidence score |
-| `get_context_map(path)` | Return a structural context summary for a module (exports, dependents, architectural notes) from Redis agent memory |
+| Tool | Description | Status |
+|---|---|---|
+| `apply_and_verify(path, new_content, refactor_kind)` | Apply Claude's proposed file contents, run the gate stack, **commit on green / roll back on fail**, append an `EditRecord` | exists |
 
-## Running the Server
+`refactor_kind` covers every organization/complexity edit **and** `consolidate_duplicate` / `remove_dead_code` — duplicate merges and dead-code deletions are nothing special; they are ordinary mutations that must pass `pytest` like any other. That is how "find dead code" becomes "**safely remove** dead code."
+
+## Data flow — the harness loop
+
+```
+Claude (reasoning agent)
+   │  1. analyze_file / find_duplicates / find_dead_code / get_context_map   ← ADVISORY (read-only)
+   │        └── core: tree-sitter parse, call graph, embeddings
+   │             └── Redis Iris: AST cache, vector index, agent memory, context retriever
+   │  2. Claude proposes concrete new file contents
+   │  3. apply_and_verify(path, new_content, kind)                           ← VERIFIED MUTATION
+   │        └── snapshot → parse → ruff → pyright → pytest
+   │             ├── all green → git commit, append EditRecord(committed)
+   │             └── any fail  → restore file, append EditRecord(rolled-back, reason)
+   │  4. on rollback, Claude reads failure_reason and re-proposes
+   └── 5. generate_docs / get_log → living docs + the dashboard trail
+```
+
+## Verification gates — cheapest-first, short-circuit on fail
+
+1. **Parse** — `tree-sitter-python` must parse the edited content (no `ERROR`/`MISSING`). Runs before touching disk.
+2. **Lint/format** — `ruff format` to normalize, then reject only *new* violations vs. the pre-edit baseline.
+3. **Type** — `pyright`; zero errors or roll back.
+4. **Behavior** — `pytest` over tests covering the touched file. Roll back on fail; record a **skip** (never a silent pass) where no test covers the file.
+5. **Re-propose** — bounded retries; the failure reason is surfaced back to Claude.
+6. **Escalate** — retries exhausted → mark `skipped-needs-human`, revert to last good state, flag it. Never force-commit.
+7. **Log** — append the structured `EditRecord` (powers the dashboard).
+
+Each gate returns `True` (pass), `False` (fail → roll back), or `None` (skipped and recorded — tool missing / no coverage). **Skips are explicit, never silent passes** — honest coverage is part of the trust story.
+
+## Edit-log schema (frozen contract)
+
+```
+{ file, refactor_kind, checks: { parse, lint, typecheck, tests }, retries, status, failure_reason, diff }
+status ∈ { committed, rolled-back, skipped-needs-human }
+```
+
+## Running the server
 
 ```bash
-# Development (MCP inspector)
-mcp dev src/refactorika/server.py
+# stdio transport for Claude Code / Claude Desktop
+python -m refactorika.mcp_server
 
-# Production (stdio transport for Claude Desktop / Claude Code)
-python -m refactorika.server
+# scripted golden-path demo (analyze → good refactor commits → bad edit caught + rolled back → dashboard)
+python -m scripts.demo
 ```
 
 ## Testing
 
 ```bash
-pytest tests/           # run all tests
-pyright src/            # type check
-ruff check src/         # lint
+pytest tests/                 # run all tests
+pyright refactorika/          # type check the package
+ruff check refactorika/       # lint
 ```
+</content>
