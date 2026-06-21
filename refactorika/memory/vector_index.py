@@ -72,6 +72,10 @@ class VectorIndex:
         self._storage = storage
         self._redis_client = storage._redis  # may be None
         self._use_redis = False
+        # True only when a RedisVL hybrid (BM25 + vector) backend is active. This engine's
+        # Redis backend is RediSearch KNN, so hybrid degrades to vector-only and this stays
+        # False; the flag exists so query_hybrid()/callers can branch and tests can assert it.
+        self._use_redisvl = False
         self._provider_name, self._dim = _provider_name_and_dim(embed_provider)
         # A namespace gives an independent vector space (e.g. "codebase" symbols must not
         # collide with decision-memory vectors, which share this class but a different store).
@@ -117,6 +121,7 @@ class VectorIndex:
                 TextField("file"),
                 TextField("name"),
                 NumericField("line"),
+                TextField("body"),  # source text, for future BM25/hybrid scoring
                 TextField("meta_json"),  # full meta dict (qualname, kind, sha, …)
             )
             definition = IndexDefinition(
@@ -150,8 +155,15 @@ class VectorIndex:
     # Public API
     # ------------------------------------------------------------------
 
-    def upsert(self, key: str, vector: list[float], meta: dict) -> None:
-        """Store or update a vector with associated metadata."""
+    def upsert(
+        self, key: str, vector: list[float], meta: "Optional[dict]" = None, *, text: str = ""
+    ) -> None:
+        """Store or update a vector with associated metadata and an optional text body.
+
+        ``text`` is the source the vector was computed from; it is persisted for BM25/hybrid
+        scoring (see query_hybrid) and ignored by pure-vector queries.
+        """
+        meta = meta or {}
         if self._use_redis:
             try:
                 import json
@@ -163,6 +175,7 @@ class VectorIndex:
                     "file": meta.get("file", ""),
                     "name": meta.get("name", ""),
                     "line": meta.get("line", 0),
+                    "body": text,
                     "meta_json": json.dumps(meta),
                 }
                 self._redis_client.hset(self._redis_doc_key(key), mapping=mapping)
@@ -171,7 +184,7 @@ class VectorIndex:
                 self._use_redis = False  # fall through to JSON
 
         data = self._json_read()
-        data[self._bucket][key] = {"vector": vector, "meta": meta}
+        data[self._bucket][key] = {"vector": vector, "text": text, "meta": meta}
         self._json_write(data)
 
     def get_meta(self, key: str) -> "Optional[dict]":
@@ -201,6 +214,26 @@ class VectorIndex:
                 self._use_redis = False
 
         return self._json_query(vector, k, threshold)
+
+    def query_hybrid(
+        self, vector: list[float], text: str, k: int = 5, filters=None
+    ) -> list[Neighbor]:
+        """Hybrid BM25 + vector search when a RedisVL backend is active; vector-only otherwise.
+
+        This engine's Redis backend is RediSearch KNN (not RedisVL), so today this degrades to
+        pure vector similarity — identical to the offline JSON path and to the offline behavior
+        of the hybrid backend. The ``text`` body is still stored on every upsert, so wiring full
+        RedisVL/BM25 hybrid later is a drop-in. ``text``/``filters`` are accepted for API parity.
+        """
+        return self.query(vector, k, threshold=0.0)
+
+    def module_filter(self, module: str):
+        """Build a module filter for hybrid search, or None when no filtering backend is active.
+
+        Returns None on the vector-only path (the current default), where query_hybrid ignores
+        filters; kept for API parity with the RedisVL hybrid backend.
+        """
+        return None
 
     def _redis_query(
         self, vector: list[float], k: int, threshold: float

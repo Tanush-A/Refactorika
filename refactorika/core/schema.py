@@ -52,6 +52,10 @@ class Opportunity:
     def to_dict(self) -> dict:
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "Opportunity":
+        return cls(**d)
+
 
 @dataclass
 class AnalysisResult:
@@ -172,6 +176,7 @@ class ModuleContext:
     flagged: list[str] = field(default_factory=list)
     changed_since_last: list[str] = field(default_factory=list)
     decisions: list[str] = field(default_factory=list)
+    last_updated_run: str = ""  # run stamp from when this context was last persisted
 
     def to_dict(self) -> dict:
         return {
@@ -182,6 +187,7 @@ class ModuleContext:
             "flagged": self.flagged,
             "changed_since_last": self.changed_since_last,
             "decisions": self.decisions,
+            "last_updated_run": self.last_updated_run,
         }
 
     @classmethod
@@ -195,6 +201,98 @@ class ModuleContext:
             flagged=d.get("flagged", []),
             changed_since_last=d.get("changed_since_last", []),
             decisions=d.get("decisions", []),
+            last_updated_run=d.get("last_updated_run", ""),
+        )
+
+
+# ---------------------------------------------------------------------------
+# V3 result types — repo audit + plan
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AuditEntry:
+    file: str
+    opportunities: list[Opportunity]
+    score: int  # sum of opportunity ranks
+
+    def to_dict(self) -> dict:
+        return {
+            "file": self.file,
+            "opportunities": [o.to_dict() for o in self.opportunities],
+            "score": self.score,
+        }
+
+
+@dataclass
+class RepoAudit:
+    repo: str
+    files_scanned: int
+    total_opportunities: int
+    by_kind: dict  # {kind: count}
+    dominant_finding: Optional[str]
+    entries: list[AuditEntry]
+
+    def to_dict(self) -> dict:
+        return {
+            "repo": self.repo,
+            "files_scanned": self.files_scanned,
+            "total_opportunities": self.total_opportunities,
+            "by_kind": self.by_kind,
+            "dominant_finding": self.dominant_finding,
+            "entries": [e.to_dict() for e in self.entries],
+        }
+
+
+@dataclass
+class PlanTask:
+    file: str
+    opportunities: list[Opportunity]
+    dependents: list[str]
+    order: int
+
+    def to_dict(self) -> dict:
+        return {
+            "file": self.file,
+            "opportunities": [o.to_dict() for o in self.opportunities],
+            "dependents": self.dependents,
+            "order": self.order,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PlanTask":
+        return cls(
+            file=d["file"],
+            opportunities=[Opportunity.from_dict(o) for o in d["opportunities"]],
+            dependents=list(d["dependents"]),
+            order=d["order"],
+        )
+
+
+@dataclass
+class Plan:
+    repo: str
+    dominant_finding: Optional[str]
+    tasks: list[PlanTask]
+    confirmed: bool = False
+    decision: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "repo": self.repo,
+            "dominant_finding": self.dominant_finding,
+            "tasks": [t.to_dict() for t in self.tasks],
+            "confirmed": self.confirmed,
+            "decision": self.decision,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Plan":
+        return cls(
+            repo=d["repo"],
+            dominant_finding=d.get("dominant_finding"),
+            tasks=[PlanTask.from_dict(t) for t in d["tasks"]],
+            confirmed=d.get("confirmed", False),
+            decision=d.get("decision"),
         )
 
 

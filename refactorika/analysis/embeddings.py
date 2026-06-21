@@ -50,3 +50,16 @@ def embed(texts: list[str]) -> list[list[float]]:
 def embed_one(text: str) -> list[float]:
     """Embed a single string. Convenience wrapper around embed()."""
     return embed([text])[0]
+
+
+def provider_dim() -> tuple[str, int]:
+    """(provider name, embedding dim) for the active provider, known without embedding.
+
+    Back-compat shim over the provider abstraction (callers/tests historically imported this
+    from here). Falls back to ("none", 0) when no provider is importable.
+    """
+    try:
+        provider = get_embedding_provider()
+        return provider.name, provider.dim()
+    except Exception:
+        return "none", 0

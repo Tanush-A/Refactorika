@@ -1,5 +1,7 @@
 # v3 Roadmap — Repo-Wide Refactoring, Call-Site Verification & Observability
 
+> ⚠️ **SUPERSEDED — original brainstorm, kept for context.** The active, codebase-reconciled plan is **`docs/v3_spec.md`** (ships §0 CallGraph reconcile + §1 audit/plan/confirm + the campaign dashboard). The two items below that are *not* in the active build — the call-site sweep gate (§2) and Sentry (§3) — are parked in **`docs/v3-worklog.md`** with the reasons. Note this roadmap predates V2 and is stale where it treats `analysis/call_graph.py` as new (V2 already shipped it) — see the spec for the reconciliation.
+
 > Builds on the shipped v1/v2 slice (`analyze_file` · `apply_and_verify` · `get_log`). v3 adds three things, in dependency order: a shared **call-graph index**, a **repo-wide audit + dependency-aware plan** with a human-confirm gate (#1), a **call-site sweep verification gate** (#2), and **Sentry observability** (cross-cutting). Inspiration is drawn from the `main` branch's convention-audit lineage, adapted to this branch's structural-refactoring thesis.
 
 ## Guiding invariant (unchanged)

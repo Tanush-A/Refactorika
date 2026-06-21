@@ -63,3 +63,43 @@ def test_cross_session_persistence(tmp_path: Path) -> None:
     results = vi2.query([1.0, 0.0], k=1, threshold=0.0)
     assert len(results) == 1
     assert results[0].key == "key1"
+
+
+def test_query_hybrid_falls_back_to_vector(tmp_path: Path) -> None:
+    """Offline (no redisvl), query_hybrid delegates to vector-only query()."""
+    _, vi = _make(tmp_path)
+    assert vi._use_redisvl is False  # on the brute-force fallback path
+
+    vi.upsert("a", [1.0, 0.0], {"name": "a"}, text="anything")
+    vi.upsert("b", [0.0, 1.0], {"name": "b"}, text="something else")
+
+    results = vi.query_hybrid([1.0, 0.0], "anything", k=1)
+    assert len(results) == 1
+    assert results[0].key == "a"
+    assert vi._use_redisvl is False
+
+
+def test_upsert_persists_text_and_meta(tmp_path: Path) -> None:
+    """text and full meta (incl. module + fingerprint) round-trip through storage."""
+    storage, vi = _make(tmp_path)
+    meta = {
+        "file": "f.py",
+        "name": "fn",
+        "line": 3,
+        "module": "m",
+        "fingerprint": "abc123",
+    }
+    vi.upsert("entry", [1.0, 0.0], meta, text="some body")
+
+    stored = storage.vector_get_all()
+    assert "entry" in stored
+    entry = stored["entry"]
+    assert entry["text"] == "some body"
+    # The bug dropped module + fingerprint; assert the FULL meta round-trips.
+    assert entry["meta"] == meta
+    assert entry["meta"]["module"] == "m"
+    assert entry["meta"]["fingerprint"] == "abc123"
+
+    neighbor_meta = vi.query([1.0, 0.0], k=1)[0].meta
+    assert neighbor_meta["module"] == "m"
+    assert neighbor_meta["fingerprint"] == "abc123"
