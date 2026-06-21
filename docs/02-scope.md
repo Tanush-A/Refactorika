@@ -24,9 +24,8 @@ Two classes of capability work together: **advisory** tools that find and explai
 - **Detect** semantic + structural duplicates (`find_duplicates`) and unreachable symbols (`find_dead_code`), each ranked with a confidence score. Never auto-delete — always surface first.
 - **Consolidate / remove** the confirmed ones as ordinary verified mutations: Claude proposes the deletion or merge, and `pytest` *proves* nothing breaks before it lands. We don't just *find* dead code — we *safely remove* it, proven by your own tests.
 
-**Context & documentation (advisory + memory)**
+**Context & documentation (advisory)**
 - Generate and self-update `.refactorika/context/<module>.md` (`generate_docs`) capturing purpose, key exports, dependents, and the architectural decisions/workarounds embedded in the code.
-- Persist that knowledge to Redis Iris agent memory so it accumulates across sessions and survives team turnover (`get_context_map`).
 
 ## Out of Scope
 
@@ -50,7 +49,7 @@ The harness is built as a vertical slice first, then broadened. Each step is dem
 1. **Verified-refactor loop** *(foundation, shipped)* — `analyze_file → apply_and_verify → commit/rollback` on a curated repo, one refactor kind end-to-end, gate stack green. This is the trust spine everything else hangs off.
 2. **Duplicate detection** — highest demo impact; reuses the existing tree-sitter AST work. Add structural fingerprinting + the Redis vector index. Consolidation rides the existing gate stack.
 3. **Dead-code analysis + verified removal** — graph-based reachability; independent of the embedding pipeline, can be built in parallel. Removal rides the gate stack.
-4. **Cross-session memory + living docs** — promote storage to full Redis Iris (agent memory + context retriever); `generate_docs` builds on retrievable prior context.
+4. **Living docs** — `generate_docs` emits `.refactorika/context/<module>.md` after each refactor session.
 
-See [05-redis-iris.md](05-redis-iris.md) for the memory layer and [04-architecture.md](04-architecture.md) for the tool surface.
+See [05-redis-iris.md](05-redis-iris.md) for the caching/embedding layer and [04-architecture.md](04-architecture.md) for the tool surface.
 </content>

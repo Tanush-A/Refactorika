@@ -1,8 +1,8 @@
-# Redis Iris — The Memory Layer
+# Redis Iris — Caching & Embeddings
 
-Most refactoring tools are stateless: every run re-parses the world from scratch and forgets everything the moment it finishes. Refactorika's differentiator is **memory** — knowledge about a codebase compounds across runs and across sessions. That memory layer is **Redis Iris**, used not as a dumb cache but as four cooperating components: an AST-keyed cache, a vector index, long-term agent memory, and a context retriever.
+Refactorika uses **Redis Iris** as two cooperating within-session components: an AST-keyed cache and a vector index for semantic duplicate detection. There is no cross-session persistence — each run is self-contained.
 
-Redis is the **primary** backend. Every component degrades to a local `.refactorika/` file so the harness — and the demo — runs fully offline. Redis is what makes it fast, persistent, and *visualizable* (Redis Insight during the demo); it is never a hard dependency.
+Redis is the **primary** backend. Every component degrades to a local `.refactorika/` file so the harness — and the demo — runs fully offline. Redis is what makes it fast and *visualizable* (Redis Insight during the demo); it is never a hard dependency.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -13,17 +13,9 @@ Redis is the **primary** backend. Every component degrades to a local `.refactor
 │  │  AST-keyed cache     │      │  {file}:{fn} → embedding      │    │
 │  │                      │      │  cosine-similarity queries    │    │
 │  │  • analysis results  │      │  • semantic duplicate pairs   │    │
-│  │  • classifications   │      │  • relevant-context retrieval │    │
+│  │  • classifications   │      │                               │    │
 │  │  exact key, no fuzzy │      └──────────────────────────────┘    │
 │  └─────────────────────┘                                           │
-│  ┌─────────────────────┐      ┌──────────────────────────────┐    │
-│  │  Agent Memory        │      │     Context Retriever         │    │
-│  │  (long-term tier)    │      │                               │    │
-│  │  • module context    │  ←→  │  structured: call-site,       │    │
-│  │  • arch decisions     │      │  convention lookups           │    │
-│  │  • refactor history   │      │  + vector: "3 most relevant   │    │
-│  │  cross-session        │      │  prior entries for this mod"  │    │
-│  └─────────────────────┘      └──────────────────────────────┘    │
 │                                                                    │
 │  Local fallback: .refactorika/state.json · context/<module>.md     │
 └──────────────────────────────────────────────────────────────────┘
@@ -52,44 +44,19 @@ Tier 1 alone is just AST equality; tier 2 alone is fuzzy and expensive. Running 
 
 **Fallback:** a brute-force cosine scan over embeddings persisted in the local JSON — slower, identical results.
 
-## 3. Agent Memory (long-term tier)
-
-**Job:** make the harness smarter every session instead of starting from zero. This is the upgrade from a within-run scratchpad to **cross-session persistence**:
-
-- **Module context** — what `generate_docs` produced last time (purpose, exports, dependents, decisions), keyed by file path.
-- **Architectural decisions** — the unusual patterns, workarounds, and invariants captured from the code, so the *why* survives team turnover.
-- **Refactor history** — the `EditRecord` log: what was tried, what passed/failed each gate, what was rolled back. Prevents re-proposing an edit that already failed verification.
-
-Because it persists, the second run on a repo retrieves prior context and does **incremental** work (diff against last time) rather than full regeneration. Repeated runs build a richer knowledge map without re-deriving structure.
-
-**Fallback:** `log` + `context` entries in `.refactorika/state.json` and `.refactorika/context/<module>.md`.
-
-## 4. Context Retriever
-
-**Job:** feed Claude exactly the relevant prior knowledge for the task at hand — without loading the whole repo into context. It combines two lookup modes:
-
-- **Structured** — direct lookups: call sites of a symbol, project import conventions, the dependents of a module.
-- **Vector** — semantic retrieval over the vector index: "the 3 most relevant prior context entries for *this* module," "functions similar to the one Claude is about to extract."
-
-This is what powers incremental `generate_docs` (retrieve last context → diff → update only what changed) and gives `apply_and_verify` proposals grounding in established conventions, so a refactor matches the surrounding code instead of inventing a new style.
-
-**Fallback:** structured lookups run directly over the AST; vector lookups use the brute-force cosine scan from component 2.
-
 ## How the components serve each tool
 
 | Tool | Primary Iris components |
 |---|---|
 | `analyze_file` | LangCache (skip re-parse) |
 | `find_duplicates` | AST-keyed cache (tier 1) + Vector Index (tier 2) |
-| `find_dead_code` | Agent Memory (prior call-graph), Context Retriever (dependents) |
-| `generate_docs` | Agent Memory (prior context, incremental diff) + Context Retriever |
-| `get_context_map` | Agent Memory + Context Retriever |
-| `apply_and_verify` | Context Retriever (conventions) → writes refactor history to Agent Memory |
+| `find_dead_code` | LangCache (prior call-graph within session) |
+| `generate_docs` | — (writes to local `.refactorika/context/<module>.md`) |
+| `apply_and_verify` | LangCache (baseline for ruff diff) |
 
-## Demo moments (Redis Insight makes the memory visible)
+## Demo moments (Redis Insight makes caching visible)
 
 - **Duplicate caught live** — run `find_duplicates` on a curated repo with a planted semantic duplicate → Redis Insight shows the vector index populating → the similarity query returns the pair with a score and a consolidation target → Claude proposes the merge → `apply_and_verify` proves it safe and commits.
 - **Dead code, safely removed** — `find_dead_code` flags an unreachable private function with high confidence → Claude proposes the deletion → `pytest` proves nothing breaks → committed. The removal is *verified*, not blind.
-- **Living docs** — run `generate_docs` before and after a refactor → show the diff of the context file → Redis Insight shows the agent-memory entry updating in place.
-- **Memory compounds** — run the harness twice; the second run hits the AST cache and retrieves prior context instead of re-deriving it — visibly faster, visibly remembering.
+- **Living docs** — run `generate_docs` after a refactor → show the generated context file capturing the module's purpose and decisions.
 </content>

@@ -1,6 +1,6 @@
 # Architecture
 
-Refactorika is **one interface-agnostic core library** wrapped in a **thin MCP shell**. The core holds all logic — analysis, the gate stack, transforms, Redis Iris memory — and reads/writes state itself, so every entry point (the MCP server, the demo script, the tests) sees the same thing. Claude proposes; the core verifies and remembers.
+Refactorika is **one interface-agnostic core library** wrapped in a **thin MCP shell**. The core holds all logic — analysis, the gate stack, transforms, and caching — and reads/writes state itself, so every entry point (the MCP server, the demo script, the tests) sees the same thing. Claude proposes; the core verifies.
 
 ## Project Layout
 
@@ -24,11 +24,8 @@ Refactorika/
 │   │   ├── dead_code.py            # call-graph reachability + confidence          (to build)
 │   │   ├── embeddings.py           # local/OpenAI embedding generation             (to build)
 │   │   └── call_graph.py           # directed symbol graph builder                 (to build)
-│   ├── memory/                     # Redis Iris wrappers (generalize storage.py)
-│   │   ├── agent_memory.py         # cross-session module context + history        (to build)
-│   │   ├── vector_index.py         # per-function embeddings + cosine queries       (to build)
-│   │   └── context.py              # Context Retriever (structured + vector)        (to build)
-│   └── docs_gen.py                 # generate_docs / context-map emission          (to build)
+│   ├── analysis/embeddings.py      # per-function embeddings + cosine queries       (to build)
+│   └── docs_gen.py                 # generate_docs emission                        (to build)
 ├── demo_repo/                      # curated messy target repo + its tests         (exists)
 ├── scripts/demo.py                 # scripted golden-path walkthrough              (exists)
 └── tests/                          # unit tests                                    (exists)
@@ -68,7 +65,6 @@ Everything the harness exposes is either **advisory** (read-only — finds and e
 | `find_duplicates(path)` | Structural fingerprint + semantic vector search; ranked pairs of duplicate functions with a consolidation target | to build |
 | `find_dead_code(path)` | Call-graph reachability; unreachable symbols with a confidence score | to build |
 | `generate_docs(path)` | Generate/update `.refactorika/context/<module>.md` (purpose, exports, dependents, decisions) | to build |
-| `get_context_map(path)` | Module context summary pulled from Redis agent memory | to build |
 | `get_log()` | The append-only edit log (powers the dashboard) | exists |
 
 ### Verified mutation (single atomic entrypoint, gated)
@@ -83,11 +79,11 @@ Everything the harness exposes is either **advisory** (read-only — finds and e
 
 ```
 Claude (reasoning agent)
-   │  1. analyze_file / find_duplicates / find_dead_code / get_context_map   ← ADVISORY (read-only)
+   │  1. analyze_file / find_duplicates / find_dead_code   ← ADVISORY (read-only)
    │        └── core: tree-sitter parse, call graph, embeddings
-   │             └── Redis Iris: AST cache, vector index, agent memory, context retriever
+   │             └── Redis Iris: AST cache, vector index
    │  2. Claude proposes concrete new file contents
-   │  3. apply_and_verify(path, new_content, kind)                           ← VERIFIED MUTATION
+   │  3. apply_and_verify(path, new_content, kind)         ← VERIFIED MUTATION
    │        └── snapshot → parse → ruff → pyright → pytest
    │             ├── all green → git commit, append EditRecord(committed)
    │             └── any fail  → restore file, append EditRecord(rolled-back, reason)
