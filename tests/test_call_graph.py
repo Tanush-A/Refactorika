@@ -85,6 +85,18 @@ def test_main_block_makes_entry_point(tmp_path: Path) -> None:
     assert "mod.run" in eps
 
 
+def test_dependents_of(tmp_path: Path) -> None:
+    # b.py and c.py both import + call a.shared; a has 2 dependents, b/c have 0.
+    (tmp_path / "a.py").write_text("def shared():\n    return 1\n")
+    (tmp_path / "b.py").write_text("from a import shared\n\ndef bb():\n    return shared()\n")
+    (tmp_path / "c.py").write_text("from a import shared\n\ndef cc():\n    return shared()\n")
+    cg = CallGraph.build(str(tmp_path))
+    assert cg.dependents_of("a") == ["b", "c"]
+    assert cg.dependent_count("a") == 2
+    assert cg.dependents_of("b") == []  # leaf, nothing depends on it
+    assert cg.dependent_count("c") == 0
+
+
 def test_call_sites_count(tmp_path: Path) -> None:
     (tmp_path / "mod.py").write_text(SIMPLE)
     cg = CallGraph.build(str(tmp_path))

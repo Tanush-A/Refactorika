@@ -322,6 +322,25 @@ class CallGraph:
         """All known qualnames."""
         return set(self._nodes.keys())
 
+    def dependents_of(self, module: str) -> list[str]:
+        """Modules referencing *module* (matched by final segment) via call-graph edges."""
+        target = module.split(".")[-1]
+        dependents: set[str] = set()
+        for qualname in self.all_symbols():
+            src_module = qualname.rsplit(".", 1)[0] if "." in qualname else qualname
+            if src_module.split(".")[-1] == target:
+                continue  # references within the same module aren't "dependents"
+            for t in self.edges_from(qualname):
+                t_module = t.rsplit(".", 1)[0] if "." in t else t
+                if t_module.split(".")[-1] == target:
+                    dependents.add(src_module)
+                    break
+        return sorted(dependents)
+
+    def dependent_count(self, module: str) -> int:
+        """How many other modules depend on *module* (blast radius)."""
+        return len(self.dependents_of(module))
+
     def entry_points(self) -> set[str]:
         """Conservatively reachable anchors."""
         return set(self._entry_points)

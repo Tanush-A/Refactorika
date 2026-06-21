@@ -1,24 +1,23 @@
-"""The 30-second magic moment, scripted end-to-end against demo_repo/.
+"""The scripted demo, end-to-end against demo_repo/.
 
-    analyze
-      -> find_duplicates (orders vs billing)
-      -> find_dead_code (flagged private helper)
-      -> generate_docs (living context file)
-      -> apply GOOD refactor (commits)
-      -> apply BAD refactor (caught, rolled back)
-      -> dashboard
+    analyze · find_duplicates · find_dead_code · generate_docs   (advisory tour)
+      -> CAMPAIGN (v3): audit_repo -> get_plan -> confirm_plan
+                        -> execute each planned edit through the gate stack
+                        -> behavior-breaking edit caught + rolled back
+                        -> render_campaign with before -> after health
 
 Run:  PATH=.venv/bin:$PATH .venv/bin/python -m scripts.demo
 """
 
 from pathlib import Path
 
+from refactorika.analysis.audit import audit_repo, build_plan
 from refactorika.analysis.dead_code import find_dead_code
 from refactorika.analysis.duplicates import find_duplicates
 from refactorika.core.analyze import analyze_file
 from refactorika.core.apply import apply_and_verify
 from refactorika.core.storage import Storage
-from refactorika.dashboard import render
+from refactorika.dashboard import render_campaign
 from refactorika.docs_gen import generate_docs
 from refactorika.memory.agent_memory import AgentMemory
 from refactorika.memory.context import ContextRetriever
@@ -27,6 +26,37 @@ from refactorika.memory.vector_index import VectorIndex
 ROOT = Path(__file__).resolve().parent.parent
 DEMO_REPO = ROOT / "demo_repo"
 TARGET = DEMO_REPO / "orders.py"
+
+# Behavior-preserving flatten of billing.calculate_invoice_total (planned task 1).
+BILLING_GOOD = '''"""Billing helpers — invoice total with membership discount and promo code."""
+
+import math
+from typing import Optional
+
+MEMBERSHIP_RATE = {"gold_bulk": 0.85, "gold": 0.90, "silver": 0.95}
+PROMO_RATE = {"SAVE10": 0.90, "SAVE20": 0.80}
+
+
+def _entry_amount(entry: dict, membership: str) -> float:
+    if entry["qty"] <= 0 or entry["price"] < 0:
+        return 0.0
+    amount = entry["price"] * entry["qty"]
+    if membership == "gold":
+        return amount * (MEMBERSHIP_RATE["gold_bulk"] if amount > 100 else MEMBERSHIP_RATE["gold"])
+    if membership == "silver":
+        return amount * MEMBERSHIP_RATE["silver"]
+    return amount
+
+
+def calculate_invoice_total(
+    line_items: list[dict], membership: str, promo: Optional[str]
+) -> float:
+    """Compute invoice total with membership discount and promo code."""
+    subtotal = sum(_entry_amount(entry, membership) for entry in line_items)
+    subtotal *= PROMO_RATE.get(promo, 1.0) if promo is not None else 1.0
+    tax = subtotal * 0.08
+    return math.floor((subtotal + tax) * 100) / 100
+'''
 
 # A behavior-preserving flatten + dedupe-imports (what Claude would propose). Type-clean, green.
 # Preserves every existing symbol (incl. _legacy_discount + _compute_shipping that
@@ -154,21 +184,50 @@ def main() -> None:
         print(f"  exports:      {names}")
 
     # ------------------------------------------------------------------
-    # 5. THE TRUST SPINE — good edit commits, behavior-break caught
+    # 5. CAMPAIGN (v3) — audit -> plan -> human confirm -> verified execution
     # ------------------------------------------------------------------
-    _section("APPLY  good refactor (flatten + dedupe imports)")
-    r1 = apply_and_verify(str(TARGET), GOOD, "flatten_nesting", storage)
-    print(f"  -> {r1.status}")
+    _section("AUDIT_REPO  demo_repo/  (forest-level, before)")
+    audit_before = audit_repo(str(DEMO_REPO), storage)
+    print(f"  files scanned: {audit_before.files_scanned}   "
+          f"opportunities: {audit_before.total_opportunities}   "
+          f"headline: {audit_before.dominant_finding}")
+    for e in audit_before.entries:
+        print(f"  - {Path(e.file).name:14} score {e.score:4}  ({len(e.opportunities)} opps)")
 
-    _section("APPLY  clean-looking but behavior-breaking edit (tax 8% -> 5%)")
-    r2 = apply_and_verify(str(TARGET), BAD, "split_function", storage)
-    print(f"  -> {r2.status}  ({r2.failure_reason})")
+    _section("GET_PLAN  (dependency-ordered, fewest-dependents-first)")
+    plan = build_plan(str(DEMO_REPO), storage)
+    for t in plan.tasks:
+        print(f"  #{t.order}  {Path(t.file).name:14} {len(t.opportunities)} opps  "
+              f"{len(t.dependents)} dependents {t.dependents or ''}")
+
+    _section("CONFIRM_PLAN  (the human checkpoint)")
+    plan.confirmed, plan.decision = True, "approve"   # what confirm_plan('approve') does
+    storage.save_plan(plan.to_dict())
+    print("  human approved -> CONFIRMED ✓   executing in plan order...")
+
+    # Execute each planned edit through the verified spine.
+    good_by_file = {"billing.py": BILLING_GOOD, "orders.py": GOOD}
+    for t in plan.tasks:
+        name = Path(t.file).name
+        content = good_by_file.get(name)
+        if content is None:
+            print(f"  #{t.order} {name}: (Claude would propose an edit here)")
+            continue
+        r = apply_and_verify(t.file, content, "flatten_nesting", storage)
+        print(f"  #{t.order} {name}: -> {r.status}")
+
+    _section("TRUST SPINE  clean-looking but behavior-breaking edit (tax 8% -> 5%)")
+    r_bad = apply_and_verify(str(TARGET), BAD, "split_function", storage)
+    print(f"  -> {r_bad.status}  ({r_bad.failure_reason})")
 
     # ------------------------------------------------------------------
-    # 6. DASHBOARD — the visible verification log
+    # 6. THE VISIBLE STORY — audit -> plan -> gate log -> before/after health
     # ------------------------------------------------------------------
-    _section("DASHBOARD")
-    print(render(storage.get_log()))
+    audit_after = audit_repo(str(DEMO_REPO), storage)
+    _section("CAMPAIGN DASHBOARD")
+    print(render_campaign(
+        audit_before.to_dict(), plan.to_dict(), storage.get_log(), audit_after.to_dict()
+    ))
 
 
 if __name__ == "__main__":

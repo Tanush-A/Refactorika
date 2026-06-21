@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
+from .analysis.audit import audit_repo as _audit_repo
+from .analysis.audit import build_plan as _build_plan
 from .analysis.dead_code import find_dead_code as _find_dead_code
 from .analysis.duplicates import find_duplicates as _find_duplicates
 from .core.analyze import analyze_file as _analyze_file
 from .core.apply import apply_and_verify as _apply_and_verify
 from .core.apply import apply_and_verify_multi as _apply_and_verify_multi
+from .core.schema import Plan
 from .core.storage import Storage
 from .docs_gen import generate_docs as _generate_docs
 from .docs_gen import get_context_map as _get_context_map
@@ -88,6 +91,51 @@ def get_context_map(path: str) -> dict:
     Falls back to deriving context via generate_docs on cold cache.
     """
     return _get_context_map(path, _storage, _agent_memory, _context_retriever)
+
+
+@mcp.tool()
+def audit_repo(path: str) -> dict:
+    """Ranked repo-wide structural-opportunity report across all files (read-only, advisory).
+
+    Aggregates per-file analysis into one report: which files, which smells, the
+    headline finding. The forest-level view a human acts on before a campaign.
+    """
+    return _audit_repo(path, _storage).to_dict()
+
+
+@mcp.tool()
+def get_plan(path: str) -> dict:
+    """Dependency-ordered refactor plan (fewest-dependents-first); persists it (read-only, advisory).
+
+    Orders deviating files low-blast-radius-first so later edits land on stable
+    ground. The plan is saved as the current plan for confirm_plan to gate.
+    """
+    return _build_plan(path, _storage).to_dict()
+
+
+@mcp.tool()
+def confirm_plan(decision: str = "approve", order: list[str] | None = None) -> dict:
+    """Human checkpoint: approve / reject / reorder the persisted plan. Never changes code.
+
+    decision='approve' green-lights execution; 'reject' stops it; 'reorder' (with
+    order=[file,...]) overrides the dependency heuristic. Returns the updated plan.
+    """
+    raw = _storage.load_plan()
+    if raw is None:
+        return {"error": "no plan to confirm; call get_plan first"}
+    plan = Plan.from_dict(raw)
+    if decision == "approve":
+        plan.confirmed, plan.decision = True, "approve"
+    elif decision == "reject":
+        plan.confirmed, plan.decision = False, "reject"
+    elif decision == "reorder" and order:
+        by_file = {t.file: t for t in plan.tasks}
+        plan.tasks = [by_file[f] for f in order if f in by_file]
+        for i, t in enumerate(plan.tasks):
+            t.order = i
+        plan.confirmed, plan.decision = True, "reorder"
+    _storage.save_plan(plan.to_dict())
+    return plan.to_dict()
 
 
 @mcp.tool()

@@ -97,21 +97,7 @@ class ContextRetriever:
         """Modules importing/referencing *module* (by final segment), via call graph."""
         from refactorika.analysis.call_graph import CallGraph  # noqa: PLC0415
 
-        cg = CallGraph.build(root)
-        target = module.split(".")[-1]
-        dependents: set[str] = set()
-        for qualname, targets in (
-            (q, cg.edges_from(q)) for q in cg.all_symbols()
-        ):
-            src_module = qualname.rsplit(".", 1)[0] if "." in qualname else qualname
-            if src_module.split(".")[-1] == target:
-                continue  # references within the same module aren't "dependents"
-            for t in targets:
-                t_module = t.rsplit(".", 1)[0] if "." in t else t
-                if t_module.split(".")[-1] == target:
-                    dependents.add(src_module)
-                    break
-        return sorted(dependents)
+        return CallGraph.build(root).dependents_of(module)
 
 
 def _is_stdlib(module: str) -> bool:

@@ -14,6 +14,7 @@ from typing import Optional
 
 _LOG_KEY = "refactorika:log"
 _CACHE_KEY = "refactorika:cache"
+_PLAN_KEY = "refactorika:plan"
 
 # Tried when neither the constructor nor REDIS_URL specifies one. Pass
 # redis_url=None explicitly to force the JSON backend (used by tests).
@@ -107,6 +108,21 @@ class Storage:
         data = self._read_json()
         data["cache"][key] = value
         self._write_json(data)
+
+    # --- current refactor plan (single plan, overwritten) ----------------------
+    def save_plan(self, plan: dict) -> None:
+        if self._redis:
+            self._redis.set(_PLAN_KEY, json.dumps(plan))
+            return
+        data = self._read_json()
+        data["plan"] = plan
+        self._write_json(data)
+
+    def load_plan(self) -> dict | None:
+        if self._redis:
+            raw = self._redis.get(_PLAN_KEY)
+            return json.loads(raw) if raw else None
+        return self._read_json().get("plan")
 
     # --- vector index fallback (brute-force when RediSearch unavailable) -------
     def vector_upsert(self, key: str, entry: dict) -> None:
