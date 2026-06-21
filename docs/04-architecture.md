@@ -2,7 +2,7 @@
 
 ## Delivery form
 
-- **Primary: MCP server.** Exposes tools so Edit Memory plugs into existing MCP-compatible agents (Claude Code, Cursor, etc.) as a refactor plugin, rather than being a standalone IDE:
+- **Primary: MCP server.** Exposes tools so Refactorika plugs into existing MCP-compatible agents (Claude Code, Cursor, etc.) as a refactor plugin, rather than being a standalone IDE:
   - `run_audit` — runs the convention audit (§ [05-core-components.md](05-core-components.md))
   - `confirm_convention` — captures the human-confirm decision from the audit
   - `get_plan` — returns the ordered refactor task list
@@ -13,7 +13,7 @@
   - `run_lint` — wraps `ruff` (check + format) on touched files
   - `run_tests` — wraps `pytest` (scoped to touched files where possible)
   - `record_edit` — appends a structured record to the per-edit audit log
-- **Fallback: CLI.** `editmemory audit <repo>`, `editmemory plan`, `editmemory check <diff>` — works against git history/diffs directly, for use without a live agent loop wired up.
+- **Fallback: CLI.** `refactorika audit <repo>`, `refactorika plan`, `refactorika check <diff>` — works against git history/diffs directly, for use without a live agent loop wired up.
 
 ## Storage
 

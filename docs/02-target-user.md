@@ -6,11 +6,11 @@ A developer or team with a legacy or partially-migrated codebase — including c
 
 ## Non-goals (v1)
 
-Edit Memory is deliberately narrow for v1, both to ship something demoable and to avoid overclaiming:
+Refactorika is deliberately narrow for v1, both to ship something demoable and to avoid overclaiming:
 
 - **One convention type.** Scoped to error-handling style (raising exceptions vs returning a `Result`-style object vs `None`/`Optional` sentinels) — not general-purpose convention detection across arbitrary pattern types.
 - **No IDE-grade "find all usages."** Call-site detection is best-effort (AST/grep-based), not full static type-checking or a true find-all-usages engine.
-- **Python only.** No multi-language support in v1. (Edit Memory itself is also written in Python.)
+- **Python only.** No multi-language support in v1. (Refactorika itself is also written in Python.)
 - **Single-run memory.** No persistent memory across multiple repo lifecycles/sessions in v1 (this is a [Reach] goal — see [06-redis-integration.md](06-redis-integration.md)). v1's memory persists only within the current audit-and-refactor run.
 
 ## Why the scope is this narrow

@@ -1,6 +1,6 @@
 # Refactorika — Docs
 
-PRD broken out by topic, sourced from `../edit_memory_prd.md`.
+The product spec, broken out by topic. This `docs/` folder is the **source of truth**; `../CLAUDE.md` is the short session-context summary that points here. Scope: everything is **[Initial]** (committed for v1) unless tagged **[Reach]**.
 
 1. [Problem, Solution & Purpose](01-problem-and-purpose.md)
 2. [Target User & Scope](02-target-user.md)
