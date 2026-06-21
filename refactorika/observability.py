@@ -94,13 +94,13 @@ def capture_exception(
     if sentry_sdk is None or not os.environ.get("SENTRY_DSN"):
         return
     try:
-        with sentry_sdk.push_scope() as scope:
+        with sentry_sdk.new_scope() as scope:
             scope.set_tag("component", component)
             scope.set_tag("phase", phase)
             for key, value in (tags or {}).items():
                 if key in _ALLOWED_TAGS:
                     scope.set_tag(key, str(value)[:200])
-            sentry_sdk.capture_exception(error)
+            sentry_sdk.capture_exception(error, scope=scope)
     except Exception:  # noqa: BLE001
         pass
 
@@ -137,7 +137,7 @@ def capture_benchmark_regression(
         regressed = rate_drop > threshold or int(current["regressions_shipped"]) > 0
         if not regressed:
             return False
-        with sentry_sdk.push_scope() as scope:
+        with sentry_sdk.new_scope() as scope:
             meta = result.get("meta", {})
             for key in ("run_id", "model", "provider", "release", "git_revision"):
                 if value := meta.get(key):
@@ -145,7 +145,7 @@ def capture_benchmark_regression(
             scope.set_tag("component", "benchmark")
             scope.set_tag("phase", "completed")
             scope.set_tag("status", "regressed")
-            sentry_sdk.capture_message("benchmark_regression", level="warning")
+            sentry_sdk.capture_message("benchmark_regression", level="warning", scope=scope)
         return True
     except Exception as exc:  # malformed baselines are operational failures
         capture_exception(exc, component="benchmark", phase="baseline_comparison")

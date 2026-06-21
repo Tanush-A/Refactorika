@@ -32,10 +32,13 @@ class _FakeSentry:
     def push_scope(self) -> _Scope:
         return _Scope()
 
-    def capture_message(self, message: str, level: str) -> None:
+    def new_scope(self) -> _Scope:
+        return _Scope()
+
+    def capture_message(self, message: str, level: str, **_kwargs) -> None:
         self.messages.append((message, level))
 
-    def capture_exception(self, error: BaseException) -> None:
+    def capture_exception(self, error: BaseException, **_kwargs) -> None:
         self.exceptions.append(error)
 
 
