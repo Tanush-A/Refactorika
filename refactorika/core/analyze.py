@@ -120,6 +120,8 @@ def _analyze(content: str, file: str) -> AnalysisResult:
 
 
 def analyze_file(path: str, storage: Optional[Storage] = None) -> AnalysisResult:
+    if Path(path).suffix != ".py":
+        return AnalysisResult(file=path, opportunities=[])
     content = Path(path).read_text()
     key = _signature(content)
     if storage:

@@ -5,7 +5,19 @@ build-backend = "hatchling.build"
 [project]
 name = "refactorika"
 version = "0.2.0"
+description = "MCP server that gives Claude verified structural-refactoring powers over Python codebases"
+authors = [{name = "Anikathapar", email = "anikathapar22@gmail.com"}]
+license = {file = "LICENSE"}
+readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "anthropic[mcp]>=0.111.0",
     "tree-sitter>=0.23.0",
@@ -26,6 +38,11 @@ dev = [
     "pyright>=1.1.0",
     "ruff>=0.6.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Tanush-A/Refactorika"
+Repository = "https://github.com/Tanush-A/Refactorika"
+Issues = "https://github.com/Tanush-A/Refactorika/issues"
 
 [project.scripts]
 refactorika = "refactorika.cli:main"

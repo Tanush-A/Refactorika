@@ -5,15 +5,11 @@ from __future__ import annotations
 import difflib
 import subprocess
 from pathlib import Path
+from typing import Optional
 
-from .gates import (
-    lint_gate,
-    parse_gate,
-    pyright_baseline,
-    ruff_baseline,
-    test_gate,
-    typecheck_gate,
-)
+from refactorika.languages import detect_language
+
+from .gates import test_gate
 from .schema import EditRecord
 from .storage import Storage
 
@@ -48,7 +44,14 @@ def apply_and_verify(
 def apply_and_verify_multi(
     edits: dict[str, str], refactor_kind: str, storage: Storage
 ) -> EditRecord:
-    """Multi-file atomic edit: all-or-nothing gate stack, one commit."""
+    """Multi-file atomic edit: all-or-nothing gate stack, one commit.
+
+    Files are grouped by detected language so each file is gated with the
+    appropriate language-specific tools (parse, lint, typecheck). Unknown
+    languages use GenericAdapter which skips those gates and records null.
+    The behavior gate (pytest) still runs once over the whole repo at the end.
+    Rollback is atomic across all files regardless of language.
+    """
     paths = {p: Path(p).resolve() for p in edits}
     first_path = next(iter(paths.values()))
     repo = _git_root(first_path)
@@ -70,39 +73,52 @@ def apply_and_verify_multi(
     checks = record.checks
 
     # Gate 1 — parse all new contents before touching disk.
+    # Each file is parsed by its language adapter; unknown langs skip (None).
+    parse_result: Optional[bool] = None
     for p, new_content in edits.items():
-        ok, detail = parse_gate(new_content)
+        adapter = detect_language(paths[p])
+        ok, detail = adapter.parse_gate(new_content)
         if ok is False:
             checks.parse = False
             return _finalize(record, "rolled-back", f"parse failed for {p}: {detail}", storage)
-    checks.parse = True
+        if ok is True:
+            parse_result = True
+    checks.parse = parse_result  # True if any adapter ran; None if all skipped
 
     # Capture lint + type baselines before writing (reject only *new* violations/errors).
-    baselines = {p: ruff_baseline(rp) for p, rp in paths.items()}
-    type_baselines = {p: pyright_baseline(rp) for p, rp in paths.items()}
+    baselines = {p: detect_language(rp).lint_baseline(rp) for p, rp in paths.items()}
+    type_baselines = {p: detect_language(rp).typecheck_baseline(rp) for p, rp in paths.items()}
 
     # Write all files.
     for p, new_content in edits.items():
         paths[p].write_text(new_content)
 
     try:
-        # Gate 2 — lint each touched file.
+        # Gate 2 — lint each touched file with its language adapter.
+        lint_result: Optional[bool] = None
         for p, rp in paths.items():
-            ok, detail = lint_gate(rp, baselines[p])
+            adapter = detect_language(rp)
+            ok, detail = adapter.lint_gate(rp, baselines[p])
             if ok is False:
                 checks.lint = False
                 return _rollback(record, paths, originals, f"lint failed for {p}: {detail}", storage)
-        checks.lint = True
+            if ok is True:
+                lint_result = True
+        checks.lint = lint_result
 
-        # Gate 3 — typecheck each touched file (only new type errors fail).
+        # Gate 3 — typecheck each touched file with its language adapter.
+        type_result: Optional[bool] = None
         for p, rp in paths.items():
-            ok, detail = typecheck_gate(rp, type_baselines[p])
+            adapter = detect_language(rp)
+            ok, detail = adapter.typecheck_gate(rp, type_baselines[p])
             if ok is False:
                 checks.typecheck = False
                 return _rollback(record, paths, originals, f"typecheck failed for {p}: {detail}", storage)
-        checks.typecheck = True
+            if ok is True:
+                type_result = True
+        checks.typecheck = type_result
 
-        # Gate 4 — behavior: one pytest run over the whole repo.
+        # Gate 4 — behavior: one pytest run over the whole repo (language-agnostic).
         ok, detail = test_gate(repo)
         checks.tests = ok
         if ok is False:
