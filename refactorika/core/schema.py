@@ -16,6 +16,27 @@ REFACTOR_KINDS = (
     "dedupe_block",
     "consolidate_duplicate",
     "remove_dead_code",
+    # v3 pipeline kinds (driven by the graph + deterministic engines)
+    "rename",
+    "move",
+    "extract",
+    "inline",
+    "change_signature",
+    "decompose_function",
+    "cleanup",
+)
+
+# v3 transform kinds the deterministic engines know how to apply from a TransformSpec.
+TRANSFORM_KINDS = (
+    "rename",            # reference-correct symbol rename across the repo
+    "move",              # move a symbol to another module, fix imports
+    "extract",           # extract a block/helper
+    "inline",            # inline a symbol into callers
+    "change_signature",  # change params/return, update call sites
+    "decompose_function",# split a god function into named pieces (LLM body, AST-node replace)
+    "cleanup",           # ruff + autoflake deterministic cleanup
+    "consolidate_duplicate",
+    "remove_dead_code",
 )
 
 
@@ -273,3 +294,135 @@ class Plan:
             confirmed=d.get("confirmed", False),
             decision=d.get("decision"),
         )
+
+
+# ---------------------------------------------------------------------------
+# V3 pipeline types — the contracts the Scout/Planner/Refactor/Checker loop runs on
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ScoutReport:
+    """One file's read-only findings from the parallel Scout pass."""
+
+    module: str
+    file: str
+    summary: str = ""
+    smells: list[str] = field(default_factory=list)  # human-readable smell notes
+    symbols: list[str] = field(default_factory=list)  # qualnames defined here
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ScoutReport":
+        return cls(**d)
+
+
+@dataclass
+class TransformSpec:
+    """A unit of work the LLM emits as *parameters*, not a diff.
+
+    The deterministic engine for `kind` reads `params` and applies the change
+    reference-correctly. `target` is the primary symbol qualname the change acts on
+    (used for ordering and impact analysis).
+    """
+
+    kind: str  # one of TRANSFORM_KINDS
+    target: str  # primary symbol qualname this transform acts on
+    params: dict = field(default_factory=dict)  # e.g. {"new_name": "..."} for rename
+    rationale: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "TransformSpec":
+        return cls(
+            kind=d["kind"],
+            target=d.get("target", ""),
+            params=d.get("params", {}),
+            rationale=d.get("rationale", ""),
+        )
+
+
+@dataclass
+class PlanItem:
+    """One entry in the ordered worklist: a transform plus its position/impact."""
+
+    spec: TransformSpec
+    order_index: int  # leaf-to-root position
+    impact: list[str] = field(default_factory=list)  # qualnames to re-verify after
+
+    def to_dict(self) -> dict:
+        return {
+            "spec": self.spec.to_dict(),
+            "order_index": self.order_index,
+            "impact": self.impact,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PlanItem":
+        return cls(
+            spec=TransformSpec.from_dict(d["spec"]),
+            order_index=d.get("order_index", 0),
+            impact=d.get("impact", []),
+        )
+
+
+@dataclass
+class Worklist:
+    """The planner's ordered output: leaf-to-root transform specs + reported cycles."""
+
+    items: list[PlanItem] = field(default_factory=list)
+    cycles: list[list[str]] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {"items": [i.to_dict() for i in self.items], "cycles": self.cycles}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Worklist":
+        return cls(
+            items=[PlanItem.from_dict(i) for i in d.get("items", [])],
+            cycles=d.get("cycles", []),
+        )
+
+
+@dataclass
+class RefactorDecision:
+    """A recorded choice, written to memory so later nodes stay consistent.
+
+    Example: extracting a duplicate the first time records the helper name chosen, so
+    the second near-duplicate is consolidated under the *same* name.
+    """
+
+    pattern: str  # what kind of situation (e.g. "duplicate-discount-logic")
+    transform_kind: str
+    target: str
+    choice: dict = field(default_factory=dict)  # e.g. {"helper_name": "apply_discount"}
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RefactorDecision":
+        return cls(**d)
+
+
+@dataclass
+class PipelineResult:
+    """The end-to-end outcome of a run: every edit + before/after metrics + the
+    authoritative full-suite baseline and finale (the real proof nothing broke)."""
+
+    path: str
+    records: list[dict] = field(default_factory=list)  # EditRecord.to_dict() each
+    metrics_before: dict = field(default_factory=dict)
+    metrics_after: dict = field(default_factory=dict)
+    cycles: list[list[str]] = field(default_factory=list)
+    applied: bool = False
+    baseline_tests: Optional[bool] = None  # True/False/None(skipped) — repo green at start?
+    baseline_detail: str = ""
+    finale_tests: Optional[bool] = None  # True/False/None — full suite green at end?
+    finale_detail: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)

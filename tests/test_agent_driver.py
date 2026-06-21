@@ -21,6 +21,23 @@ class PassingGateTools(DeveloperTools):
         return ToolResult(status="ok")
 
 
+class RejectingPatchTools(PassingGateTools):
+    def __init__(self, repo: Path, *, reject_every_patch: bool = False) -> None:
+        super().__init__(repo)
+        self.patch_calls = 0
+        self.reject_every_patch = reject_every_patch
+
+    def submit_patch(self, **kwargs: Any) -> ToolResult:
+        self.patch_calls += 1
+        if self.reject_every_patch or self.patch_calls == 1:
+            return ToolResult(
+                status="error",
+                error="verification rejected patch",
+                error_class="VerificationRejected",
+            )
+        return super().submit_patch(**kwargs)
+
+
 class ScriptedProvider:
     def __init__(self, turns: list[list[dict[str, Any]]]) -> None:
         self.turns = iter(turns)
@@ -242,6 +259,47 @@ def test_combined_selection_and_plan_is_normalized_through_required_states(
     ]
 
 
+def test_discovery_request_to_enter_planning_is_normalized(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n")
+    provider = ScriptedProvider(
+        [
+            [use("workflow_action", {"next_state": "plan"}, 1)],
+            [use("workflow_action", {"next_state": "execute", "plan": plan()}, 2)],
+            [
+                use(
+                    "submit_patch",
+                    {
+                        "edits": {"app.py": "VALUE = 2\n"},
+                        "refactor_kind": "simplify",
+                        "plan_step": "step-1",
+                    },
+                    3,
+                )
+            ],
+        ]
+    )
+    result = AgentLoop(
+        SharedAgentDriver(
+            provider,
+            PassingGateTools(tmp_path),
+            arm="agentic+harness",
+            case="enter-plan",
+            trial=0,
+            user_prompt="refactor this codebase",
+            harness_context={},
+        )
+    ).run()
+
+    assert result.termination_reason is TerminationReason.COMPLETED
+    assert result.model_calls == 3
+    assert result.metadata["visited_states"][:4] == [
+        "discover",
+        "select",
+        "plan",
+        "execute",
+    ]
+
+
 def test_invalid_multifile_plan_step_is_returned_for_model_repair(tmp_path: Path) -> None:
     (tmp_path / "app.py").write_text("VALUE = 1\n")
     (tmp_path / "caller.py").write_text("from app import VALUE\n")
@@ -288,6 +346,234 @@ def test_invalid_multifile_plan_step_is_returned_for_model_repair(tmp_path: Path
     patch_events = [event for event in result.tool_events if event.tool == "submit_patch"]
     assert [event.status for event in patch_events] == ["error", "ok"]
     assert patch_events[0].error_class == "InvalidPlanStep"
+
+
+def test_rejected_patch_can_replan_once_from_clean_baseline(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n")
+    patch = {
+        "edits": {"app.py": "VALUE = 2\n"},
+        "refactor_kind": "simplify",
+        "plan_step": "step-1",
+    }
+    provider = ScriptedProvider(
+        [
+            [use("workflow_action", {"next_state": "select"}, 1)],
+            [use("workflow_action", {"next_state": "execute", "plan": plan()}, 2)],
+            [use("submit_patch", patch, 3)],
+            [
+                use(
+                    "workflow_action",
+                    {
+                        "next_state": "plan",
+                        "replan_rationale": "verification rejected the original step",
+                    },
+                    4,
+                )
+            ],
+            [use("workflow_action", {"next_state": "execute", "plan": plan()}, 5)],
+            [use("submit_patch", patch, 6)],
+        ]
+    )
+    result = AgentLoop(
+        SharedAgentDriver(
+            provider,
+            RejectingPatchTools(tmp_path),
+            arm="agentic+harness",
+            case="bounded-replan",
+            trial=0,
+            user_prompt="refactor this codebase",
+            harness_context={},
+        )
+    ).run()
+
+    assert result.termination_reason is TerminationReason.COMPLETED
+    assert result.model_calls == 6
+    assert result.metadata["replan_attempts"] == 1
+    assert result.metadata["campaign_replanned"] is True
+    assert result.metadata["visited_states"].count("plan") == 2
+    assert result.edits == {"app.py": "VALUE = 2\n"}
+
+
+def test_second_replan_request_safely_escalates_and_rolls_back(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n")
+    patch = {
+        "edits": {"app.py": "VALUE = 2\n"},
+        "refactor_kind": "simplify",
+        "plan_step": "step-1",
+    }
+    replan = {
+        "next_state": "plan",
+        "replan_rationale": "verification rejected the current plan",
+    }
+    provider = ScriptedProvider(
+        [
+            [use("workflow_action", {"next_state": "select"}, 1)],
+            [use("workflow_action", {"next_state": "execute", "plan": plan()}, 2)],
+            [use("submit_patch", patch, 3)],
+            [use("workflow_action", replan, 4)],
+            [use("workflow_action", {"next_state": "execute", "plan": plan()}, 5)],
+            [use("submit_patch", patch, 6)],
+            [use("workflow_action", replan, 7)],
+        ]
+    )
+    result = AgentLoop(
+        SharedAgentDriver(
+            provider,
+            RejectingPatchTools(tmp_path, reject_every_patch=True),
+            arm="agentic",
+            case="replan-budget",
+            trial=0,
+            user_prompt="refactor this codebase",
+        )
+    ).run()
+
+    assert result.termination_reason is TerminationReason.SAFE_ESCALATION
+    assert result.error == "replan budget exhausted"
+    assert result.metadata["replan_attempts"] == 1
+    assert result.metadata["campaign_rollback_complete"] is True
+    assert result.edits == {}
+
+
+def test_invalid_replan_action_gets_one_corrective_retry(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n")
+    patch = {
+        "edits": {"app.py": "VALUE = 2\n"},
+        "refactor_kind": "simplify",
+        "plan_step": "step-1",
+    }
+    missing_rationale = {"next_state": "plan"}
+    provider = ScriptedProvider(
+        [
+            [use("workflow_action", {"next_state": "select"}, 1)],
+            [use("workflow_action", {"next_state": "execute", "plan": plan()}, 2)],
+            [use("submit_patch", patch, 3)],
+            [use("workflow_action", missing_rationale, 4)],
+            [use("workflow_action", missing_rationale, 5)],
+        ]
+    )
+    result = AgentLoop(
+        SharedAgentDriver(
+            provider,
+            RejectingPatchTools(tmp_path, reject_every_patch=True),
+            arm="agentic+harness",
+            case="invalid-replan",
+            trial=0,
+            user_prompt="refactor this codebase",
+            harness_context={},
+        )
+    ).run()
+
+    assert result.termination_reason is TerminationReason.SAFE_ESCALATION
+    assert "invalid replan action" in (result.error or "")
+    assert result.metadata["workflow_action_retries"] == 1
+
+
+def test_execution_can_supply_replacement_plan_after_rejection(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n")
+    revised = plan()
+    revised["rationale"] = "diagnostics require a revised implementation"
+    provider = ScriptedProvider(
+        [
+            [use("workflow_action", {"next_state": "select"}, 1)],
+            [use("workflow_action", {"next_state": "execute", "plan": plan()}, 2)],
+            [
+                use(
+                    "submit_patch",
+                    {
+                        "edits": {"app.py": "VALUE = 2\n"},
+                        "refactor_kind": "simplify",
+                        "plan_step": "step-1",
+                    },
+                    3,
+                )
+            ],
+            [
+                use(
+                    "workflow_action",
+                    {
+                        "next_state": "plan",
+                        "plan": revised,
+                        "replan_rationale": "verification rejected the original plan",
+                    },
+                    4,
+                )
+            ],
+            [
+                use(
+                    "submit_patch",
+                    {
+                        "edits": {"app.py": "VALUE = 2\n"},
+                        "refactor_kind": "simplify",
+                        "plan_step": "step-1",
+                    },
+                    5,
+                )
+            ],
+        ]
+    )
+    result = AgentLoop(
+        SharedAgentDriver(
+            provider,
+            RejectingPatchTools(tmp_path),
+            arm="agentic",
+            case="execution-replan",
+            trial=0,
+            user_prompt="refactor this codebase",
+        )
+    ).run()
+
+    assert result.termination_reason is TerminationReason.COMPLETED
+    assert result.model_calls == 5
+    assert result.plan is not None
+    assert result.plan.rationale == "diagnostics require a revised implementation"
+    assert result.metadata["visited_states"].count("plan") == 2
+
+
+def test_repair_can_supply_replacement_plan_after_rejection(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n")
+    revised = plan()
+    revised["rationale"] = "repair diagnostics require a revised implementation"
+    patch = {
+        "edits": {"app.py": "VALUE = 2\n"},
+        "refactor_kind": "simplify",
+        "plan_step": "step-1",
+    }
+    provider = ScriptedProvider(
+        [
+            [use("workflow_action", {"next_state": "select"}, 1)],
+            [use("workflow_action", {"next_state": "execute", "plan": plan()}, 2)],
+            [use("submit_patch", patch, 3)],
+            [
+                use(
+                    "workflow_action",
+                    {
+                        "next_state": "plan",
+                        "plan": revised,
+                        "replan_rationale": "verification rejected the original plan",
+                    },
+                    4,
+                )
+            ],
+            [use("submit_patch", patch, 5)],
+        ]
+    )
+    result = AgentLoop(
+        SharedAgentDriver(
+            provider,
+            RepairGateTools(tmp_path),
+            arm="agentic+harness",
+            case="repair-replan",
+            trial=0,
+            user_prompt="refactor this codebase",
+            harness_context={},
+        )
+    ).run()
+
+    assert result.termination_reason is TerminationReason.COMPLETED_AFTER_REPAIR
+    assert result.model_calls == 5
+    assert result.plan is not None
+    assert result.plan.rationale == "repair diagnostics require a revised implementation"
+    assert result.metadata["visited_states"].count("plan") == 2
 
 
 def provider_message_text(messages: list[dict[str, Any]]) -> str:
@@ -538,6 +824,38 @@ def test_completion_audit_allows_one_successful_repair(tmp_path: Path) -> None:
     assert tools.test_calls == 2
     assert result.metadata["completion_audit"]["status"] == "passed"
     assert result.metadata["visited_states"].count("repair") == 1
+
+
+def test_repair_can_inspect_before_submitting_corrected_patch(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("def old():\n    return 1\n")
+    patch = {
+        "edits": {"app.py": "def format_name():\n    return 1\n"},
+        "refactor_kind": "rename",
+        "plan_step": "step-1",
+    }
+    provider = ScriptedProvider(
+        [
+            [use("workflow_action", {"next_state": "select"}, 1)],
+            [use("workflow_action", {"next_state": "execute", "plan": plan()}, 2)],
+            [use("submit_patch", patch, 3)],
+            [use("read_file", {"path": "app.py"}, 4)],
+            [use("submit_patch", patch, 5)],
+        ]
+    )
+    result = AgentLoop(
+        SharedAgentDriver(
+            provider,
+            RepairGateTools(tmp_path),
+            arm="agentic",
+            case="inspect-before-repair",
+            trial=0,
+            user_prompt="refactor this codebase",
+        )
+    ).run()
+
+    assert result.termination_reason is TerminationReason.COMPLETED_AFTER_REPAIR
+    assert result.metadata["visited_states"].count("repair") == 2
+    assert result.metadata["repair_attempts"] == 2
 
 
 def test_second_completion_gate_failure_terminates_without_more_repairs(

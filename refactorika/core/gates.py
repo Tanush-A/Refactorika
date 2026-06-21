@@ -24,9 +24,20 @@ GateResult = tuple[Optional[bool], str]
 
 
 def _tool(name: str) -> Optional[str]:
-    """Absolute path to a CLI tool, or None. Absolute so it resolves under any subprocess cwd."""
+    """Absolute path to a CLI tool, or None. Absolute so it resolves under any subprocess cwd.
+
+    Falls back to the directory of the running interpreter (the venv's bin), so tools
+    installed in the active environment are found even when it isn't on PATH.
+    """
     found = shutil.which(name)
-    return os.path.abspath(found) if found else None
+    if found:
+        return os.path.abspath(found)
+    import sys
+
+    candidate = Path(sys.executable).parent / name
+    if candidate.exists():
+        return str(candidate)
+    return None
 
 
 def _has_error(node) -> bool:
@@ -59,7 +70,8 @@ def lint_gate(path: Path, baseline_violations: int) -> GateResult:
     """Normalize formatting (behavior-preserving) then reject only *new* lint violations."""
     if _tool("ruff") is None:
         return None, "ruff not installed — skipped"
-    subprocess.run([_tool("ruff"), "format", str(path)], capture_output=True, text=True)  # normalize
+    # normalize formatting first (behavior-preserving)
+    subprocess.run([_tool("ruff"), "format", str(path)], capture_output=True, text=True)
     new_count = _ruff_violation_count(path)
     if new_count > baseline_violations:
         return False, f"ruff: {new_count - baseline_violations} new violation(s)"
@@ -67,7 +79,7 @@ def lint_gate(path: Path, baseline_violations: int) -> GateResult:
 
 
 def _pyright_error_count(path: Path) -> Optional[int]:
-    """pyright error count for a file; None if output is unparseable. Assumes pyright installed."""
+    """Number of pyright errors on *path*, or None if pyright output is unparseable."""
     out = subprocess.run(
         [_tool("pyright"), "--outputjson", str(path)], capture_output=True, text=True
     )
@@ -78,45 +90,52 @@ def _pyright_error_count(path: Path) -> Optional[int]:
 
 
 def pyright_baseline(path: Path) -> int:
-    """Type-error count on the original file, captured before the edit (0 if pyright absent)."""
+    """Pyright error count on the original file, captured before the edit is written.
+
+    Single-file pyright can report environment-only errors (e.g. an unresolved import that
+    has nothing to do with the change). Baselining means we reject only *new* type errors,
+    exactly as the lint gate rejects only new lint violations.
+    """
     if _tool("pyright") is None:
         return 0
-    count = _pyright_error_count(path)
-    return count if count is not None else 0
+    return _pyright_error_count(path) or 0
 
 
 def typecheck_gate(path: Path, baseline_errors: int = 0) -> GateResult:
-    """Reject only *new* type errors vs the pre-edit baseline (mirrors lint_gate).
-
-    A behavior-preserving refactor that leaves a pre-existing type complaint
-    (e.g. a function that already returned ``int | None``) passes; only an edit
-    that makes the type-error count go *up* is rolled back. Absolute "must be
-    type-perfect" rejection over-rejects correct code, so we ask the same
-    question as the lint gate: did this edit make types *worse*?
-    """
+    """pyright must introduce no *new* type errors vs. the pre-edit baseline."""
     if _tool("pyright") is None:
         return None, "pyright not installed — skipped"
-    count = _pyright_error_count(path)
-    if count is None:
+    errors = _pyright_error_count(path)
+    if errors is None:
         return False, "pyright: unparseable output"
-    if count > baseline_errors:
-        return False, f"pyright: {count - baseline_errors} new type error(s)"
-    return True, f"pyright clean ({count} <= {baseline_errors} baseline)"
+    if errors > baseline_errors:
+        return False, f"pyright: {errors - baseline_errors} new type error(s)"
+    return True, f"pyright clean ({errors} <= {baseline_errors} baseline)"
 
 
-def test_gate(repo_dir: Path) -> GateResult:
-    """pytest over the repo. Exit 5 (no tests collected) -> skip; type-clean != correct."""
+def test_gate(repo_dir: Path, node_ids: Optional[list[str]] = None) -> GateResult:
+    """pytest over the repo (or only *node_ids* for impact-scoped runs).
+
+    Passing the impacted test node ids (``path::test_name``) runs only the tests a
+    change can affect — the efficiency win — instead of the whole suite every edit.
+    Exit 5 (no tests collected) -> skip; type-clean != behavior-preserving.
+    """
     if _tool("pytest") is None:
         return None, "pytest not installed — skipped"
+    selection = list(node_ids) if node_ids else []
     out = subprocess.run(
-        [_tool("pytest"), "-q", "--no-header"], cwd=str(repo_dir), capture_output=True, text=True
+        [_tool("pytest"), "-q", "--no-header", *selection],
+        cwd=str(repo_dir),
+        capture_output=True,
+        text=True,
     )
     if out.returncode == 5:
-        return None, "no tests cover this file — skipped"
+        return None, "no tests cover this change — skipped"
     if out.returncode != 0:
         tail = (out.stdout or out.stderr).strip().splitlines()[-1:] or ["tests failed"]
         return False, f"pytest failed: {tail[0]}"
-    return True, "pytest green"
+    scope = f"{len(selection)} impacted test(s)" if selection else "full suite"
+    return True, f"pytest green ({scope})"
 
 
 def ruff_baseline(path: Path) -> int:

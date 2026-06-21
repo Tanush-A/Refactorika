@@ -9,12 +9,17 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 
 _LOG_KEY = "refactorika:log"
 _CACHE_KEY = "refactorika:cache"
 _PLAN_KEY = "refactorika:plan"
+
+
+def _truthy(value: Optional[str]) -> bool:
+    return str(value).lower() in ("1", "true", "yes", "on") if value else False
 
 # Tried when neither the constructor nor REDIS_URL specifies one. Pass
 # redis_url=None explicitly to force the JSON backend (used by tests).
@@ -38,13 +43,25 @@ def _load_dotenv(path: str = ".env") -> None:
 class Storage:
     def __init__(self, redis_url=_UNSET, json_path: Optional[Path] = None):
         _load_dotenv()
-        if redis_url is _UNSET:  # not specified -> env, then localhost default
-            redis_url = os.environ.get("REDIS_URL", _DEFAULT_REDIS_URL)
+        explicit_url = os.environ.get("REDIS_URL")  # None unless the user set it
+        offline = _truthy(os.environ.get("REFACTORIKA_OFFLINE"))
+        if redis_url is _UNSET:  # not specified -> env/offline policy
+            # Offline mode (CI/tests) forces JSON. Otherwise prefer an explicit REDIS_URL
+            # (e.g. Redis Cloud), falling back to a local default.
+            redis_url = None if offline else (explicit_url or _DEFAULT_REDIS_URL)
         self.json_path = Path(
             json_path or os.environ.get("REFACTORIKA_STATE", ".refactorika/state.json")
         )
         self._redis = self._connect(redis_url)
         self.backend = "redis" if self._redis else "json"
+        # If the user explicitly pointed us at a Redis (cloud) and it's unreachable, say so
+        # loudly rather than silently degrading — but still run on the JSON fallback.
+        if self._redis is None and explicit_url and not offline and redis_url is not None:
+            print(
+                f"[refactorika] REDIS_URL set but unreachable ({explicit_url}); "
+                "using local JSON fallback.",
+                file=sys.stderr,
+            )
 
     def _connect(self, url: Optional[str]):
         if not url:  # explicit None/"" -> JSON backend

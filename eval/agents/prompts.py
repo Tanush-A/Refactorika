@@ -29,7 +29,9 @@ AGENTIC_SYSTEM = (
     "with next_state=select. During planning, call workflow_action with "
     "next_state=execute and a complete structured plan. During execution or repair, "
     "use submit_patch for one planned step; verification and completion auditing are "
-    "orchestrated automatically."
+    "orchestrated automatically. After rejected verification or completion audit, you may "
+    "request one bounded replan with workflow_action next_state=plan and a non-empty "
+    "replan_rationale."
 )
 
 
@@ -44,7 +46,9 @@ AGENTIC_HARNESS_SYSTEM = (
     "turns, then call workflow_action with next_state=select. During planning, call "
     "workflow_action with next_state=execute and a complete structured plan. During "
     "execution or repair, use submit_patch for one planned step; verification and "
-    "completion auditing are orchestrated automatically."
+    "completion auditing are orchestrated automatically. After rejected verification or "
+    "completion audit, you may request one bounded replan with workflow_action "
+    "next_state=plan and a non-empty replan_rationale."
 )
 
 

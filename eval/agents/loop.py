@@ -58,11 +58,11 @@ class InvalidTransitionError(MalformedResponseError):
 class LoopBudgets:
     """Maximum model calls by phase and across the entire run."""
 
-    discovery_calls: int = 6
-    planning_calls: int = 3
-    execution_calls: int = 8
-    repair_calls: int = 4
-    completion_audit_calls: int = 2
+    discovery_calls: int = 8
+    planning_calls: int = 4
+    execution_calls: int = 20
+    repair_calls: int = 8
+    completion_audit_calls: int = 3
     total_calls: int = 30
     timeout_seconds: float = 900.0
 
@@ -116,11 +116,15 @@ _ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
     # PLAN may retry itself when a provider returns a structurally invalid plan.
     # The retry remains bounded by ``planning_calls`` and ``total_calls``.
     WorkflowState.PLAN: frozenset((WorkflowState.PLAN, WorkflowState.EXECUTE)),
-    WorkflowState.EXECUTE: frozenset((WorkflowState.EXECUTE, WorkflowState.VERIFY)),
+    WorkflowState.EXECUTE: frozenset(
+        (WorkflowState.EXECUTE, WorkflowState.PLAN, WorkflowState.VERIFY)
+    ),
     WorkflowState.VERIFY: frozenset(
         (WorkflowState.EXECUTE, WorkflowState.REPAIR, WorkflowState.COMPLETION_AUDIT)
     ),
-    WorkflowState.REPAIR: frozenset((WorkflowState.VERIFY,)),
+    WorkflowState.REPAIR: frozenset(
+        (WorkflowState.REPAIR, WorkflowState.PLAN, WorkflowState.VERIFY)
+    ),
     WorkflowState.COMPLETION_AUDIT: frozenset((WorkflowState.REPAIR, WorkflowState.DONE)),
     WorkflowState.DONE: frozenset(),
 }
@@ -177,6 +181,9 @@ class AgentLoop:
                     context.metadata["repair_attempts"] = (
                         int(context.metadata.get("repair_attempts", 0)) + 1
                     )
+                if action.metadata.get("campaign_replanned"):
+                    context.edits.clear()
+                    context.plan = None
                 context.edits.update(action.edits)
                 context.plan = action.plan or context.plan
                 context.metadata.update(action.metadata)
