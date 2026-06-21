@@ -1,4 +1,12 @@
-# Refactorika — Build Spec
+# Refactorika — Build Spec (v2, SUPERSEDED)
+
+> ⚠️ **Superseded by [`v3_spec.md`](v3_spec.md).** This document describes the earlier
+> *MCP-harness* model, where an external Claude proposed whole-file `new_content` and a gate
+> stack verified it. The product has since been rebuilt into a **graph-driven, autonomous
+> refactoring engine** (Jedi reference resolution + deterministic transform engines +
+> leaf-to-root pipeline + standalone CLI). Read `v3_spec.md` for the as-built system; this file
+> is kept for history only. The gate-stack and Redis-fallback ideas below carried forward; the
+> "Claude proposes whole files" model did not.
 
 > The single buildable spec for the full product. Grounded in the shipped code (`refactorika/core/`) and docs 01–05. Where a number/threshold is a guess it's marked **[tune]**; where a design choice is open it's marked **[decide]**. Eval/benchmark docs (11–12) are intentionally out of scope here.
 >

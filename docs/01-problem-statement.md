@@ -19,14 +19,31 @@ AI assistants can suggest refactors, but they operate in a chat window disconnec
 
 ## How Refactorika Fits In
 
-**Refactorika is an agent harness delivered as an MCP (Model Context Protocol) server.** Claude is the reasoning agent — it reads code, decides what to change, and proposes concrete edits. Refactorika is the harness around it, providing three things Claude can't get on its own:
+**Refactorika is a graph-driven, verified refactoring engine.** It treats refactoring as a
+whole-program graph problem, not a per-file one — because the dangerous changes (rename, move,
+dedup, dead-code removal) are about *relationships between files*. It provides four things a chat
+assistant or a linter cannot:
 
-1. **Structure-aware analysis** — read-only tools that parse the AST and surface ranked, concrete opportunities (god-files, deep nesting, semantic duplicates, dead code) instead of vague advice.
-2. **A verification gate stack** — every *mutation* Claude proposes is run through `parse → ruff → pyright → pytest` and committed only if it passes, rolled back atomically if it doesn't. The product's promise: **the agent restructured it, but nothing landed unverified.**
-3. **Cross-session memory (Redis Iris)** — an AST cache, a vector index of every function, long-term agent memory, and a context retriever. Knowledge *compounds*: the second run on a repo is smarter than the first, and the context behind a decision survives team turnover.
+1. **A reference-correct program model** — a symbol graph built from real static analysis (Jedi),
+   so it knows the true binding of every name. A rename updates *every* real reference and
+   *nothing* that merely shares the name; dead code is flagged only when reachability proves it
+   unreachable from any entry point.
+2. **Deterministic transform engines** — rope (cross-file rename), LibCST (node replacement,
+   dead-code removal), ruff + autoflake (cleanup) do the actual edits reference-correctly across
+   every file. The LLM is used only for *judgment* (which god function to split, how to name the
+   pieces) and emits compact specs, never hand-written diffs.
+3. **A verification gate, then commit** — every edit passes `parse → ruff → pyright → pytest`
+   (tests *impact-scoped* to what the change can affect) before `git commit`, and reverts
+   byte-for-byte on any failure. The full suite gates the run at baseline and finale. The promise:
+   **the engine restructured it, but nothing landed unverified.**
+4. **A shared brain (Redis Iris)** — the graph, the per-decision memory, and a vector index live
+   in Redis (local-JSON fallback). Decisions are recalled so the work stays *consistent* across
+   the repo — the same situation is refactored the same way every time.
 
-Because it runs as an MCP server, all of this happens inline in a normal Claude conversation — read, analyze, propose, verify, commit, remember — without leaving the development workflow. The goal is to make safe structural change as frictionless as running a linter: point it at a codebase, describe the intent, and get clean, reorganized, **proven-safe** code back — plus living documentation of why it looks the way it does.
+It runs as a **standalone CLI** (`refactorika <dir>`) and as an **MCP server** for use inside an
+agent. The goal: make safe, repo-wide structural change as frictionless as running a linter.
 
-See [02-scope.md](02-scope.md) for what's in and out, [04-architecture.md](04-architecture.md) for how the harness is built, and [05-redis-iris.md](05-redis-iris.md) for the memory layer.
-</content>
+See [02-scope.md](02-scope.md) for what's in and out, and **[v3_spec.md](v3_spec.md)** for the
+full as-built architecture, the verification model, and the Redis-as-decision-memory design.
+
 </invoke>

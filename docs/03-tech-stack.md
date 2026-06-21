@@ -1,48 +1,57 @@
 # Tech Stack
 
+> Reflects the as-built v3 engine. See [v3_spec.md](v3_spec.md) for how the pieces fit.
+
 ## Language
+- **Python 3.11+** — the engine *and* the target it refactors.
 
-- **Python 3.11+** — the harness *and* the target it refactors.
+## Program model (correctness foundation)
+- **`jedi`** — real name binding / reference resolution. Builds the symbol graph in
+  `graph/resolver.py`: resolves each use to its true definition across imports, aliases, scopes,
+  and method dispatch. This is what replaces the old regex call-graph and makes renames and
+  dead-code analysis reference-correct.
+- **`tree-sitter` + `tree-sitter-python`** — fast structural parsing (function spans, canonical
+  type-stream fingerprints for the decision-memory shape key, the parse gate).
 
-## MCP Layer
+## Transform engines (the only code that mutates source)
+- **`rope`** — turnkey, semantic cross-file **rename-propagation**; we extract the new file
+  contents from its changeset *without applying to disk* so the checker controls commit.
+- **`libcst`** — lossless CST for **node replacement** (god-function decomposition) and surgical
+  **dead-code removal**; preserves formatting and comments.
+- **`ruff` + `autoflake`** — deterministic **cleanup** (unused imports/vars, simplifications,
+  modern syntax, formatting); zero LLM.
 
-- **`mcp` Python SDK (`FastMCP`)** — exposes Refactorika's capabilities as MCP tools Claude invokes inline during a conversation. The server (`refactorika/mcp_server.py`) is a thin shell over the core library.
+## Verification gate stack (cheapest-first, short-circuit)
+- **`tree-sitter`** — parse gate (no `ERROR`/`MISSING` nodes), before touching disk.
+- **`ruff`** — lint gate; only *new* violations vs. a pre-edit baseline are rejected.
+- **`pyright`** — type gate; zero errors.
+- **`pytest`** — behavior gate, **impact-scoped** (only tests reachable from the changed symbol).
+  Full suite at baseline + finale. Type-clean ≠ behavior-preserving — this is the real proof.
+- **`git`** — atomic apply/revert; each verified edit is its own commit, rollback restores files.
 
-## Code Analysis
+## Judgment layer
+- **`anthropic`** (Claude, temp 0) — used only for judgment (which god function to decompose, how
+  to name helpers), returns structured specs. Wrapped with a **record/replay cache** + stub seam
+  so runs are reproducible and tests/demos are fully offline; degrades to the deterministic plan
+  with no API key.
 
-- **`tree-sitter` + `tree-sitter-python`** — AST parsing for all structure-aware analysis: function boundaries, import blocks, nesting depth, normalized structural fingerprints, and the symbol graph used for dead-code reachability.
+## Front doors
+- **`typer`** — the standalone CLI (`refactorika <dir>` + `--apply`/`--show-graph`/`--show-plan`/`--llm`).
+- **`mcp` (`FastMCP`)** — the MCP server (`build_graph`, `get_plan`, `run_pipeline`, `get_log`).
 
-## Verification Gate Stack
+## Metrics
+- **`radon`** — LOC + cyclomatic complexity for the before/after report (with the graph's
+  dead-code count).
 
-Every mutation passes these in cheapest-first order, short-circuiting on the first failure (see [04-architecture.md](04-architecture.md)):
-
-- **`tree-sitter`** — parse gate: the edited source must parse with no `ERROR`/`MISSING` nodes.
-- **`ruff`** — lint/format gate: normalize formatting, then reject only *new* violations vs. the pre-edit baseline.
-- **`pyright`** — type gate: refactored output must stay type-safe (zero errors).
-- **`pytest`** — behavior gate: type-clean ≠ behavior-preserving. This is what catches silent regressions and proves a dead-code removal or duplicate merge is safe.
-
-## Duplicate & Dead-Code Analysis
-
-- **Structural fingerprinting** — normalize each function's AST (strip identifiers and literals, keep structural shape), hash it, and key it in Redis. Catches exact and near-exact clones precisely and cheaply.
-- **Semantic embeddings** — embed the *actual* function (signature + body + docstring), not just the denatured shape, via an embedding model. Default **`sentence-transformers`** (local, offline-capable, no API key); optional **`text-embedding-3-small`** via OpenAI for higher quality when an API key is configured. Stored in the Redis vector index and queried by cosine similarity. Catches same-intent / different-structure duplicates that structural hashing misses. (See [05-redis-iris.md](05-redis-iris.md) for why both tiers exist.)
-- **Call-graph reachability** — a directed symbol graph over the full AST (nodes: functions/classes/module assignments; edges: call + import references). Entry points (public API exports, `__main__`, direct test callees) are marked; BFS/DFS reachability from those anchors flags unreachable symbols as dead-code candidates with a confidence score.
-
-## Memory & State — Redis Iris
-
-**Redis is the primary backend, with a mandatory local-file fallback so the demo always runs offline.** Redis Iris is used as four components — full detail in [05-redis-iris.md](05-redis-iris.md):
-
-- **LangCache / AST-keyed cache** — memoizes analysis + classification keyed on a *normalized AST signature* (exact key, not fuzzy match — so a re-seen file skips re-parsing without risking a false cache hit corrupting accuracy).
-- **Vector Index** — per-function embeddings keyed on `{file}:{function_name}`, queried by cosine similarity for `find_duplicates` and for context retrieval.
-- **Agent Memory (long-term tier)** — persists module context, architectural decisions, and refactor history *across sessions* so knowledge compounds instead of being re-derived each run.
-- **Context Retriever** — structured lookups (call sites, conventions) **+** vector lookups ("the 3 most relevant prior context entries for this module") that feed Claude's next proposal without loading the whole repo.
-
-**Fallback:** every Iris component degrades to a local `.refactorika/` file (`state.json`, plus `context/<module>.md` for docs). If Redis is unreachable the harness still works — Redis is an optimization and the live demo's visualization (Redis Insight), never a hard dependency.
-
-## Embeddings
-
-- **`sentence-transformers`** (`all-MiniLM-L6-v2`, local/offline, no key) by default; **`text-embedding-3-small`** via OpenAI when `OPENAI_API_KEY` is set. Shipped as an **optional extra** (`refactorika[semantic]`) — without it, duplicate detection runs structural-only. Cosine math via `numpy`.
+## Memory & state — Redis Iris (primary, mandatory local-JSON fallback)
+- **Graph + leaf-to-root order** — queryable program state.
+- **Decision memory** — `RefactorDecision` keyed by structural shape, so the same situation is
+  refactored the same way across the repo (the "beyond a cache" differentiator).
+- **Vector index** — per-function embeddings for duplicate detection / similar-refactor exemplars
+  (optional `[semantic]` extra: `sentence-transformers` local, or OpenAI).
+- **Fallback:** every component degrades to `.refactorika/` files; kill Redis and results are
+  identical. Redis is an optimization (and the live demo's Redis Insight view), never required.
 
 ## Testing
-
-- **`pytest`** — unit + integration tests for the analysis, transforms, gate stack, and storage fallback.
-</content>
+- **`pytest`** — offline suite (stubbed LLM/embedder, no Redis): resolver correctness, each
+  engine, the verified spine, and the LLM + decision-memory loop.
