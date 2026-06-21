@@ -529,6 +529,53 @@ def test_execution_can_supply_replacement_plan_after_rejection(tmp_path: Path) -
     assert result.metadata["visited_states"].count("plan") == 2
 
 
+def test_repair_can_supply_replacement_plan_after_rejection(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n")
+    revised = plan()
+    revised["rationale"] = "repair diagnostics require a revised implementation"
+    patch = {
+        "edits": {"app.py": "VALUE = 2\n"},
+        "refactor_kind": "simplify",
+        "plan_step": "step-1",
+    }
+    provider = ScriptedProvider(
+        [
+            [use("workflow_action", {"next_state": "select"}, 1)],
+            [use("workflow_action", {"next_state": "execute", "plan": plan()}, 2)],
+            [use("submit_patch", patch, 3)],
+            [
+                use(
+                    "workflow_action",
+                    {
+                        "next_state": "plan",
+                        "plan": revised,
+                        "replan_rationale": "verification rejected the original plan",
+                    },
+                    4,
+                )
+            ],
+            [use("submit_patch", patch, 5)],
+        ]
+    )
+    result = AgentLoop(
+        SharedAgentDriver(
+            provider,
+            RepairGateTools(tmp_path),
+            arm="agentic+harness",
+            case="repair-replan",
+            trial=0,
+            user_prompt="refactor this codebase",
+            harness_context={},
+        )
+    ).run()
+
+    assert result.termination_reason is TerminationReason.COMPLETED_AFTER_REPAIR
+    assert result.model_calls == 5
+    assert result.plan is not None
+    assert result.plan.rationale == "repair diagnostics require a revised implementation"
+    assert result.metadata["visited_states"].count("plan") == 2
+
+
 def provider_message_text(messages: list[dict[str, Any]]) -> str:
     return "\n".join(
         content

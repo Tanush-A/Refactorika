@@ -122,7 +122,9 @@ _ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
     WorkflowState.VERIFY: frozenset(
         (WorkflowState.EXECUTE, WorkflowState.REPAIR, WorkflowState.COMPLETION_AUDIT)
     ),
-    WorkflowState.REPAIR: frozenset((WorkflowState.REPAIR, WorkflowState.VERIFY)),
+    WorkflowState.REPAIR: frozenset(
+        (WorkflowState.REPAIR, WorkflowState.PLAN, WorkflowState.VERIFY)
+    ),
     WorkflowState.COMPLETION_AUDIT: frozenset((WorkflowState.REPAIR, WorkflowState.DONE)),
     WorkflowState.DONE: frozenset(),
 }

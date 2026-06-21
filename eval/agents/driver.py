@@ -198,7 +198,7 @@ def developer_tool_schemas() -> list[dict[str, Any]]:
                 "replan_rationale": {
                     "type": "string",
                     "description": (
-                        "Required for execute-to-plan after a rejected patch."
+                        "Required for replanning after rejected verification or audit."
                     ),
                 },
             },
@@ -385,7 +385,7 @@ class SharedAgentDriver:
             )
         except MalformedResponseError as exc:
             is_replan_request = (
-                state is WorkflowState.EXECUTE
+                state in {WorkflowState.EXECUTE, WorkflowState.REPAIR}
                 and declaration is not None
                 and declaration.get("next_state") == WorkflowState.PLAN.value
             )
@@ -415,7 +415,7 @@ class SharedAgentDriver:
                     "content": (
                         "The workflow action was rejected. If planning, return "
                         "workflow_action with next_state=execute and a complete plan. If "
-                        "requesting a replan after a rejected patch, return workflow_action "
+                        "requesting a replan after rejected verification, return workflow_action "
                         "with next_state=plan and a non-empty replan_rationale. "
                         f"Validation error: {exc}"
                     ),
@@ -571,6 +571,7 @@ class SharedAgentDriver:
                 metadata=metadata,
             )
         self._completion_repair_attempted = True
+        self._replan_allowed = True
         self._append_audit_feedback(audit_data)
         return LoopAction(WorkflowState.REPAIR, tool_events=events, metadata=metadata)
 
@@ -684,12 +685,17 @@ class SharedAgentDriver:
             # Selection is a required bookkeeping state but deliberately consumes no
             # model call. Preserve that state without rejecting a combined model action.
             next_state = WorkflowState.SELECT
-        if state is WorkflowState.EXECUTE and next_state is WorkflowState.PLAN:
+        if (
+            state in {WorkflowState.EXECUTE, WorkflowState.REPAIR}
+            and next_state is WorkflowState.PLAN
+        ):
             rationale = declaration.get("replan_rationale")
             if not isinstance(rationale, str) or not rationale.strip():
                 raise MalformedResponseError("replan requires a non-empty replan_rationale")
             if not self._replan_allowed:
-                raise MalformedResponseError("replan is allowed only after a rejected patch")
+                raise MalformedResponseError(
+                    "replan is allowed only after rejected verification or completion audit"
+                )
             if self._replan_attempts >= 1:
                 return (
                     WorkflowState.EXECUTE,
