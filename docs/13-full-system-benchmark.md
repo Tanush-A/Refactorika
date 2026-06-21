@@ -36,7 +36,7 @@ system-level tradeoff.
 
 ## Cases and grading
 
-The 47 controlled cases cover:
+The 49 controlled cases cover:
 
 - behavior preservation across rounding, loop control flow, and near-duplicate
   semantics;
@@ -48,6 +48,8 @@ The 47 controlled cases cover:
   contracts, type protocols, generated files, and same-named decoys;
 - async cancellation and ordering, transaction rollback, serialization,
   filesystem confinement, middleware order, caching, and resource safety.
+- controlled 20- and 100-file repositories with identical relevant dependency
+  clusters, deterministic distractors, and explicit size/LOC metadata.
 
 Only baseline files are materialized for an agent. Oracle tests remain in the
 evaluator and are injected after the final patch. Structural checks are also
@@ -94,7 +96,7 @@ run.
 # Validate that baselines preserve behavior and still contain refactoring work.
 make benchmark-full-calibrate
 
-# Full run: 47 cases x three trials x two arms.
+# Full run: 49 cases x three trials x two arms.
 MODEL=claude-sonnet-4-5-20250929 make benchmark-full-agent
 
 # Optional cost accounting and aggregate regression warning.

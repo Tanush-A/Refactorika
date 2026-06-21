@@ -19,7 +19,7 @@ import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -34,8 +34,10 @@ from eval.harness_tasks import (  # noqa: E402
     materialize,
 )
 from refactorika.harness import mark_escalated, verify_edits  # noqa: E402
+from refactorika.observability import capture_exception, init_sentry  # noqa: E402
 
 REQUIRED_GATES = ("lint", "typecheck", "tests")
+DEFAULT_TIMEOUT = 180
 
 
 @dataclass
@@ -74,7 +76,9 @@ class ReferenceProposer:
 class OpenAICompatibleProposer:
     """Minimal proposer for Ollama, LM Studio, vLLM, and compatible endpoints."""
 
-    def __init__(self, model: str, base_url: str, seed: int, timeout: int = 300) -> None:
+    def __init__(
+        self, model: str, base_url: str, seed: int, timeout: int = DEFAULT_TIMEOUT
+    ) -> None:
         self.model = model
         self.name = model
         self.base_url = base_url.rstrip("/")
@@ -154,7 +158,7 @@ def _load_env(name: str) -> str | None:
 class AnthropicProposer:
     """Direct Anthropic Messages API adapter with exact token accounting."""
 
-    def __init__(self, model: str, seed: int, timeout: int = 300) -> None:
+    def __init__(self, model: str, seed: int, timeout: int = DEFAULT_TIMEOUT) -> None:
         self.model = model
         self.name = model
         self.seed = seed
@@ -254,7 +258,7 @@ def _write_patch(repo: Path, edits: dict[str, str]) -> str | None:
     return None
 
 
-def oracle_grade(task: TaskSpec, repo: Path) -> tuple[bool, str]:
+def oracle_grade(task: TaskSpec, repo: Path, timeout: int = DEFAULT_TIMEOUT) -> tuple[bool, str]:
     """Inject held-out tests only for grading, then remove them."""
 
     oracle_dir = repo / "tests" / "oracle"
@@ -262,15 +266,31 @@ def oracle_grade(task: TaskSpec, repo: Path) -> tuple[bool, str]:
     test_file = oracle_dir / "test_heldout.py"
     test_file.write_text(heldout_test(task))
     command = [sys.executable, "-m", "pytest", "-q", "tests/gate", "tests/oracle"]
-    result = subprocess.run(command, cwd=repo, text=True, capture_output=True, check=False)
-    shutil.rmtree(oracle_dir)
+    try:
+        result = subprocess.run(
+            command,
+            cwd=repo,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(f"shared-patch oracle exceeded {timeout}s") from exc
+    finally:
+        shutil.rmtree(oracle_dir, ignore_errors=True)
     tail = (result.stdout + "\n" + result.stderr).strip().splitlines()
     return result.returncode == 0, tail[-1] if tail else f"exit {result.returncode}"
 
 
-def calibrate(tasks: tuple[TaskSpec, ...] = TASKS) -> dict:
+def calibrate(
+    tasks: tuple[TaskSpec, ...] = TASKS,
+    progress: Callable[[str], None] | None = None,
+) -> dict:
     records: list[dict] = []
     for task in tasks:
+        if progress:
+            progress(f"calibration task={task.name} control=good start")
         with tempfile.TemporaryDirectory(prefix=f"cal-good-{task.name}-") as tmp:
             repo = materialize(task, Path(tmp) / "repo")
             result = verify_edits(repo, good_patch(task), required_gates=REQUIRED_GATES)
@@ -287,8 +307,12 @@ def calibrate(tasks: tuple[TaskSpec, ...] = TASKS) -> dict:
                     "checks": asdict(result.checks),
                 }
             )
+            if progress:
+                progress(f"calibration task={task.name} control=good complete passed={passed}")
 
         for label, patch in bad_patches(task).items():
+            if progress:
+                progress(f"calibration task={task.name} control={label} start")
             with tempfile.TemporaryDirectory(prefix=f"cal-bad-{task.name}-") as tmp:
                 repo = materialize(task, Path(tmp) / "repo")
                 result = verify_edits(repo, patch, required_gates=REQUIRED_GATES)
@@ -307,6 +331,11 @@ def calibrate(tasks: tuple[TaskSpec, ...] = TASKS) -> dict:
                                 "checks": asdict(result.checks),
                             }
                         )
+                        if progress:
+                            progress(
+                                f"calibration task={task.name} control={label} "
+                                "complete passed=False"
+                            )
                         continue
                 oracle, detail = oracle_grade(task, repo)
                 passed = not oracle
@@ -322,6 +351,10 @@ def calibrate(tasks: tuple[TaskSpec, ...] = TASKS) -> dict:
                         "checks": asdict(result.checks),
                     }
                 )
+                if progress:
+                    progress(
+                        f"calibration task={task.name} control={label} " f"complete passed={passed}"
+                    )
     failed = [r for r in records if not r["passed"]]
     return {
         "valid": not failed,
@@ -495,8 +528,11 @@ def run(
     skip_calibration: bool,
     input_cost: float,
     output_cost: float,
+    progress: Callable[[str], None] | None = None,
 ) -> dict:
-    calibration = {"valid": True, "skipped": True} if skip_calibration else calibrate(tasks)
+    calibration = (
+        {"valid": True, "skipped": True} if skip_calibration else calibrate(tasks, progress)
+    )
     output = {
         "meta": {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -515,22 +551,37 @@ def run(
         return output
     for trial in range(trials):
         for task in tasks:
-            output["records"].extend(
-                _run_pair(
-                    task,
-                    proposer,
-                    max_retries,
-                    trial,
-                    input_cost,
-                    output_cost,
-                )
+            if progress:
+                progress(f"trial={trial + 1} task={task.name} start arms=off,on")
+            pair_records = _run_pair(
+                task,
+                proposer,
+                max_retries,
+                trial,
+                input_cost,
+                output_cost,
             )
+            output["records"].extend(pair_records)
+            if progress:
+                for record in pair_records:
+                    progress(
+                        f"trial={trial + 1} task={task.name} arm={record['arm']} "
+                        f"complete status={record['status']} "
+                        f"oracle_pass={record['oracle_pass']}"
+                    )
+                progress(f"trial={trial + 1} task={task.name} complete")
     output["aggregate"] = aggregate(output["records"])
     output["status"] = "valid"
     return output
 
 
+def _console_progress(message: str) -> None:
+    timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    print(f"[{timestamp}] {message}", file=sys.stderr, flush=True)
+
+
 def main() -> int:
+    init_sentry("benchmark")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--calibrate-only", action="store_true")
     parser.add_argument(
@@ -543,6 +594,7 @@ def main() -> int:
     parser.add_argument("--max-retries", type=int, default=2)
     parser.add_argument("--input-cost-per-mtok", type=float, default=0.0)
     parser.add_argument("--output-cost-per-mtok", type=float, default=0.0)
+    parser.add_argument("--request-timeout", type=int, default=DEFAULT_TIMEOUT)
     parser.add_argument(
         "--task",
         action="append",
@@ -551,32 +603,51 @@ def main() -> int:
     )
     parser.add_argument("--skip-calibration", action="store_true")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--quiet-progress", action="store_true")
     args = parser.parse_args()
+    progress = None if args.quiet_progress else _console_progress
 
     selected = tuple(task for task in TASKS if not args.task or task.name in args.task)
-    if args.calibrate_only:
-        result = {"status": "valid", "calibration": calibrate(selected)}
-        if not result["calibration"]["valid"]:
-            result["status"] = "void"
-    else:
-        if args.provider == "reference":
-            proposer: Proposer = ReferenceProposer()
-        elif args.provider == "anthropic":
-            proposer = AnthropicProposer(args.model, args.seed)
-        else:
-            proposer = OpenAICompatibleProposer(args.model, args.base_url, args.seed)
-        result = run(
-            proposer,
-            selected,
-            args.trials,
-            args.max_retries,
-            args.skip_calibration,
-            args.input_cost_per_mtok,
-            args.output_cost_per_mtok,
-        )
-
     destination = args.output or REPO_ROOT / "eval" / "results" / "harness-latest.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if args.calibrate_only:
+            result = {"status": "valid", "calibration": calibrate(selected, progress)}
+            if not result["calibration"]["valid"]:
+                result["status"] = "void"
+        else:
+            if args.provider == "reference":
+                proposer: Proposer = ReferenceProposer()
+            elif args.provider == "anthropic":
+                proposer = AnthropicProposer(args.model, args.seed, timeout=args.request_timeout)
+            else:
+                proposer = OpenAICompatibleProposer(
+                    args.model,
+                    args.base_url,
+                    args.seed,
+                    timeout=args.request_timeout,
+                )
+            result = run(
+                proposer,
+                selected,
+                args.trials,
+                args.max_retries,
+                args.skip_calibration,
+                args.input_cost_per_mtok,
+                args.output_cost_per_mtok,
+                progress,
+            )
+    except Exception as exc:  # noqa: BLE001 - preserve a failure artifact for diagnosis
+        capture_exception(exc, component="benchmark", phase="run")
+        result = {
+            "status": "invalid-infrastructure",
+            "error": {"class": type(exc).__name__, "message": str(exc)},
+            "meta": {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "model": args.model,
+                "provider": args.provider,
+            },
+        }
     destination.write_text(json.dumps(result, indent=2) + "\n")
     calibration = result.get("calibration", {})
     print(

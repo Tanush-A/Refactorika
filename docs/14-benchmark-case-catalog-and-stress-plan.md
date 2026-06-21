@@ -84,7 +84,8 @@ after exhausting repair attempts.
 
 ### Implemented stress expansion
 
-The suite now contains 47 cases: the foundational nine plus 38 stress cases.
+The suite now contains 49 cases: the foundational nine, 38 focused stress cases,
+and deterministic 20- and 100-file repository-scale cases.
 
 | Module | Cases | Coverage |
 |---|---:|---|
@@ -92,6 +93,7 @@ The suite now contains 47 cases: the foundational nine plus 38 stress cases.
 | `stress_semantics_extra.py` | 10 | Numeric thresholds, rounding sequence, loop guards, alias ownership, error payloads/chaining, generator cleanup, recursion cycles, grouping order, cleanup semantics |
 | `stress_contracts_extra.py` | 10 | Import topology, circular-sensitive moves, exports, signatures, plugins, dataclasses, protocols, generated exclusions, symbol decoys, enum values |
 | `stress_systems_extra.py` | 10 | Async cancellation/order, transactions, serialization, timezones, wire enums, filesystem safety, middleware order, caches and resource cleanup |
+| `scale.py` | 2 | Deterministic 20- and 100-file rename/move repositories with caller-shape, compatibility, registry, boundary, and protected-file checks |
 
 All 38 use the same generic user prompt, architecture evidence, visible tests,
 held-out behavioral tests, and declarative structural expectations. Calibration

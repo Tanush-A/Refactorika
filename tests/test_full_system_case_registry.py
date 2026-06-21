@@ -4,6 +4,7 @@ from eval.full_system_cases import (
     CONTRACT_STRESS_CASES,
     MULTIFILE_CASES,
     RECOVERY_CASES,
+    SCALE_CASES,
     SEMANTIC_STRESS_CASES,
     STRESS_CASES,
     SYSTEM_STRESS_CASES,
@@ -19,8 +20,9 @@ def test_registry_contains_non_overlapping_case_families() -> None:
     assert len(SEMANTIC_STRESS_CASES) == 10
     assert len(CONTRACT_STRESS_CASES) == 10
     assert len(SYSTEM_STRESS_CASES) == 10
-    assert len(ALL_CASES) == 47
-    assert len({case.name for case in ALL_CASES}) == 47
+    assert len(SCALE_CASES) == 2
+    assert len(ALL_CASES) == 49
+    assert len({case.name for case in ALL_CASES}) == 49
 
 
 def test_every_case_starts_from_the_exact_same_generic_prompt() -> None:

@@ -3,6 +3,7 @@
 from .behavior import BEHAVIOR_CASES, BehaviorCase
 from .multifile import MULTIFILE_CASES, MultiFileCase
 from .recovery import RECOVERY_CASES, RecoveryCase
+from .scale import SCALE_CASES, ScaleCase
 from .stress import STRESS_CASES, StressCase
 from .stress_contracts_extra import STRESS_CASES as CONTRACT_STRESS_CASES
 from .stress_semantics_extra import STRESS_CASES as SEMANTIC_STRESS_CASES
@@ -17,6 +18,7 @@ ALL_CASES = (
     *SEMANTIC_STRESS_CASES,
     *CONTRACT_STRESS_CASES,
     *SYSTEM_STRESS_CASES,
+    *SCALE_CASES,
 )
 
 __all__ = [
@@ -25,6 +27,7 @@ __all__ = [
     "CONTRACT_STRESS_CASES",
     "MULTIFILE_CASES",
     "RECOVERY_CASES",
+    "SCALE_CASES",
     "SEMANTIC_STRESS_CASES",
     "STRESS_CASES",
     "SYSTEM_STRESS_CASES",
@@ -32,5 +35,6 @@ __all__ = [
     "BehaviorCase",
     "MultiFileCase",
     "RecoveryCase",
+    "ScaleCase",
     "StressCase",
 ]
