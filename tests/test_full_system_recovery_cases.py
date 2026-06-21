@@ -16,7 +16,8 @@ def test_cases_expose_only_generic_prompt_and_keep_oracle_hidden(tmp_path: Path)
     assert len(RECOVERY_CASES) == 3
     for case in RECOVERY_CASES:
         repo = materialize(case, tmp_path / case.name)
-        assert case.initial_prompt == "Refactor this codebase while preserving behavior."
+        assert case.initial_prompt == "refactor this codebase"
+        assert case.user_prompt == "refactor this codebase"
         assert not (repo / "tests" / "oracle").exists()
         assert case.hidden_oracle
         assert case.expected_diagnostics

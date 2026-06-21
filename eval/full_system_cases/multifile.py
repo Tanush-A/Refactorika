@@ -163,6 +163,7 @@ def test_new_internal_name_and_legacy_public_api() -> None:
 
 
 CASES = (RENAME_REEXPORT, MOVE_SYMBOL, PUBLIC_API)
+MULTIFILE_CASES = CASES
 
 
 def materialize(case: MultiFileCase, destination: Path) -> Path:

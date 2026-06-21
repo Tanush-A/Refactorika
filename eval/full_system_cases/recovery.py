@@ -25,7 +25,11 @@ class RecoveryCase:
     expected_failure: FailureClass
     expected_diagnostics: tuple[str, ...]
     max_retries: int = 2
-    initial_prompt: str = "Refactor this codebase while preserving behavior."
+    initial_prompt: str = "refactor this codebase"
+
+    @property
+    def user_prompt(self) -> str:
+        return self.initial_prompt
 
     @property
     def baseline_files(self) -> dict[str, str]:
