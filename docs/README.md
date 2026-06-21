@@ -1,4 +1,4 @@
-# Edit Memory — Docs
+# Refactorika — Docs
 
 PRD broken out by topic, sourced from `../edit_memory_prd.md`.
 

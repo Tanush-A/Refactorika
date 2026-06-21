@@ -11,7 +11,7 @@ This problem is getting more urgent, not less: a growing share of production cod
 
 ## Solution
 
-**Edit Memory** is a convention-audit and guided-refactor layer designed to be run *as a plugin* against a codebase that's ready for refactor. Instead of trusting an agent to refactor unsupervised, or doing the work by hand, a team runs Edit Memory on the repo and it:
+**Refactorika** is a convention-audit and guided-refactor layer designed to be run *as a plugin* against a codebase that's ready for refactor. Instead of trusting an agent to refactor unsupervised, or doing the work by hand, a team runs Edit Memory on the repo and it:
 
 - **Audits** the codebase for a specific convention (v1: error-handling style) and reports where it's inconsistent.
 - **Plans** a safe, dependency-aware order to fix it (least-risky files first).
@@ -22,7 +22,7 @@ The core idea: convert refactoring from an unsupervised, repo-wide agent task (h
 
 ## Purpose / why this matters
 
-- **Plugin model, not a one-off script.** Edit Memory is meant to be invoked on a codebase once it's identified as "ready for refactor" — it's a tool you run *on top of* an existing repo, via MCP (so it plugs into Claude Code, Cursor, etc.) or a CLI fallback, not a rewrite-from-scratch generator.
+- **Plugin model, not a one-off script.** Refactorika is meant to be invoked on a codebase once it's identified as "ready for refactor" — it's a tool you run *on top of* an existing repo, via MCP (so it plugs into Claude Code, Cursor, etc.) or a CLI fallback, not a rewrite-from-scratch generator.
 - **Targets the AI-slop problem directly.** As more production code is AI-generated, the failure mode shifts from "bugs" to "inconsistency that compounds" — every new agent session might pick a different error-handling style, a different naming scheme, with no memory of what came before. Edit Memory gives the refactor pass exactly that memory.
 - **Trust through verification, not trust through prompting.** Rather than asking an agent to "please be careful," every edit passes through a verification harness (parse check, typecheck, call-site sweep) before being committed. The pitch is "an agent did this work, but every step was checked" — not "an agent did this work, trust it."
 
