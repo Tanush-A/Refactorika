@@ -49,6 +49,9 @@ def run_pipeline(
     graph = build_graph(workdir)
     checker = Checker(workdir, storage=storage, run_tests=run_tests)
 
+    # Authoritative baseline: the repo must start green, or "we kept it green" is empty.
+    baseline_ok, baseline_detail = (checker.run_full_suite() if run_tests else (None, "skipped"))
+
     plan = (planner or deterministic_plan)(graph)
     records: list[dict] = []
 
@@ -71,6 +74,8 @@ def run_pipeline(
         records.extend(_cascade_dead_code(workdir, checker))
 
     after = repo_metrics(workdir)
+    # Authoritative finale: the whole suite, not the impact-scoped subset.
+    finale_ok, finale_detail = (checker.run_full_suite() if run_tests else (None, "skipped"))
     return PipelineResult(
         path=workdir,
         records=records,
@@ -78,40 +83,45 @@ def run_pipeline(
         metrics_after=after,
         cycles=plan.cycles,
         applied=apply,
+        baseline_tests=baseline_ok,
+        baseline_detail=baseline_detail,
+        finale_tests=finale_ok,
+        finale_detail=finale_detail,
     )
 
 
-def _cascade_dead_code(workdir: str, checker: Checker, max_rounds: int = 10) -> list[dict]:
-    """Remove newly-orphaned dead symbols until a fixpoint (or max_rounds)."""
+def _cascade_dead_code(workdir: str, checker: Checker, max_rounds: int = 25) -> list[dict]:
+    """Remove newly-orphaned dead symbols until a fixpoint (or max_rounds).
+
+    One removal per round, each against a freshly-built graph (positions shift after a
+    removal). A removed function can orphan its helper, then a constant — the loop keeps
+    going until reachability is stable.
+    """
     out: list[dict] = []
     seen: set[str] = set()
     for _ in range(max_rounds):
         graph = build_graph(workdir)
         reach = reachable_from(graph, graph.entry_points)
-        dead = [
+        dead = sorted(
             q for q in graph.symbols
             if q not in reach and graph.symbols[q].kind != "module"
             and graph.symbols[q].is_private and q not in seen
-        ]
+        )
         if not dead:
             break
-        progressed = False
-        for q in dead:
-            seen.add(q)
-            spec = TransformSpec(kind="remove_dead_code", target=q,
-                                 rationale="orphaned by a prior removal (cascade)")
-            try:
-                edits = dispatch(spec, workdir, build_graph(workdir))
-            except Exception:
-                continue
-            if not edits:
-                continue
-            node_ids = impacted_test_node_ids(graph, workdir, sorted(impact_of(graph, q)))
-            rec = checker.verify_apply(edits, "remove_dead_code", test_node_ids=node_ids)
-            out.append(rec.to_dict())
-            progressed = True
-        if not progressed:
-            break
+        q = dead[0]
+        seen.add(q)
+        spec = TransformSpec(kind="remove_dead_code", target=q,
+                             rationale="orphaned by a prior removal (cascade)")
+        try:
+            edits = dispatch(spec, workdir, graph)
+        except Exception:
+            continue
+        if not edits:
+            continue
+        node_ids = impacted_test_node_ids(graph, workdir, sorted(impact_of(graph, q)))
+        rec = checker.verify_apply(edits, "remove_dead_code", test_node_ids=node_ids)
+        out.append(rec.to_dict())
     return out
 
 

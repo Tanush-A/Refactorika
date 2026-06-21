@@ -12,9 +12,13 @@ from .core.apply import apply_and_verify_multi as _apply_and_verify_multi
 from .core.storage import Storage
 from .docs_gen import generate_docs as _generate_docs
 from .docs_gen import get_context_map as _get_context_map
+from .graph.order import reachable_from, topo_order
+from .graph.resolver import build_graph as _build_graph
 from .memory.agent_memory import AgentMemory
 from .memory.context import ContextRetriever
 from .memory.vector_index import VectorIndex
+from .pipeline.orchestrator import run_pipeline as _run_pipeline
+from .pipeline.planner import deterministic_plan as _deterministic_plan
 
 mcp = FastMCP("refactorika")
 
@@ -94,6 +98,45 @@ def get_context_map(path: str) -> dict:
 def get_log() -> list[dict]:
     """Return the append-only edit log (powers the dashboard)."""
     return _storage.get_log()
+
+
+# --- v3 pipeline surface (the primary, autonomous engine) ------------------------
+
+@mcp.tool()
+def build_graph(path: str) -> dict:
+    """Build the reference-correct symbol graph (read-only).
+
+    Returns symbols, leaf-to-root apply order, entry points, dead symbols, and cycles —
+    the whole-program model the pipeline plans on.
+    """
+    g = _build_graph(path)
+    order, cycles = topo_order(g)
+    reach = reachable_from(g, g.entry_points)
+    dead = sorted(q for q in g.symbols if q not in reach and g.symbols[q].kind != "module")
+    return {
+        "path": path,
+        "symbols": {q: s.to_dict() for q, s in g.symbols.items()},
+        "leaf_to_root": order,
+        "entry_points": sorted(g.entry_points),
+        "dead_symbols": dead,
+        "cycles": cycles,
+    }
+
+
+@mcp.tool()
+def get_plan(path: str) -> dict:
+    """Return the leaf-to-root worklist of transform specs the pipeline would run (read-only)."""
+    return _deterministic_plan(_build_graph(path)).to_dict()
+
+
+@mcp.tool()
+def run_pipeline(path: str, apply: bool = False) -> dict:
+    """Run the full verified refactor pipeline. Dry-run by default; apply=True commits.
+
+    Returns every edit record (committed/rolled-back), before/after metrics, and the
+    authoritative baseline + finale full-suite test results.
+    """
+    return _run_pipeline(path, apply=apply, storage=_storage).to_dict()
 
 
 def main() -> None:

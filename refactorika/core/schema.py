@@ -312,7 +312,8 @@ class RefactorDecision:
 
 @dataclass
 class PipelineResult:
-    """The end-to-end outcome of a run: every edit + before/after metrics."""
+    """The end-to-end outcome of a run: every edit + before/after metrics + the
+    authoritative full-suite baseline and finale (the real proof nothing broke)."""
 
     path: str
     records: list[dict] = field(default_factory=list)  # EditRecord.to_dict() each
@@ -320,6 +321,10 @@ class PipelineResult:
     metrics_after: dict = field(default_factory=dict)
     cycles: list[list[str]] = field(default_factory=list)
     applied: bool = False
+    baseline_tests: Optional[bool] = None  # True/False/None(skipped) — repo green at start?
+    baseline_detail: str = ""
+    finale_tests: Optional[bool] = None  # True/False/None — full suite green at end?
+    finale_detail: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
