@@ -16,10 +16,15 @@ redisvl (or a live Redis) is absent.
 from __future__ import annotations
 
 import os
+import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
+
+# RedisVL's FT.HYBRID surface is flagged "experimental" and warns on every query;
+# the API is stable enough for us — silence the noise so demo/CLI output stays clean.
+warnings.filterwarnings("ignore", message=r".*[Ee]xperimental.*")
 
 if TYPE_CHECKING:
     from redisvl.query.filter import FilterExpression
@@ -50,7 +55,11 @@ def _cosine(a: list[float], b: list[float]) -> float:
         return dot / (norm_a * norm_b + 1e-9)
 
 
-_RETURN_FIELDS = ["file", "module", "name", "line", "fingerprint"]
+# Bump when the index schema changes so a fresh index is created (old one orphaned).
+_SCHEMA_VERSION = "v2"
+# We store the original upsert key as its own field: HybridQuery results don't carry
+# the doc id, so we read the key back from this field (works for both query types).
+_RETURN_FIELDS = ["key", "file", "module", "name", "line", "fingerprint"]
 
 
 class VectorIndex:
@@ -68,7 +77,7 @@ class VectorIndex:
             provider, dim = ("none", 0)
         self._provider = provider
         self._dim = int(dim)
-        self._index_name = f"refactorika:vec:{provider}:{dim}"
+        self._index_name = f"refactorika:vec:{_SCHEMA_VERSION}:{provider}:{dim}"
 
         self._index = None
         self._use_redisvl = self._ensure_index()
@@ -105,6 +114,7 @@ class VectorIndex:
                         },
                     },
                     {"name": "body", "type": "text"},
+                    {"name": "key", "type": "tag"},
                     {"name": "file", "type": "tag"},
                     {"name": "module", "type": "tag"},
                     {"name": "name", "type": "tag"},
@@ -161,6 +171,7 @@ class VectorIndex:
                                 vector, dtype=np.float32
                             ).tobytes(),
                             "body": text,
+                            "key": key,
                             "file": meta.get("file", ""),
                             "module": meta.get("module", ""),
                             "name": meta.get("name", ""),
@@ -215,6 +226,7 @@ class VectorIndex:
                 num_results=k,
                 return_fields=_RETURN_FIELDS,
                 yield_combined_score_as="hybrid_score",
+                stopwords=None,  # don't require nltk; code identifiers aren't English stopwords
             )
             docs = self._index.query(hq)
             neighbors: list[Neighbor] = []
@@ -224,15 +236,20 @@ class VectorIndex:
                 )
                 neighbors.append(
                     Neighbor(
-                        key=self._strip_prefix(doc.get("id", "")),
+                        key=doc.get("key") or self._strip_prefix(doc.get("id", "")),
                         score=score,
                         meta=self._doc_meta(doc),
                     )
                 )
             return neighbors
         except Exception:
-            self._use_redisvl = False
-            return self.query(vector, k, threshold=0.0)
+            # Hybrid failed but the index is live — fall back to vector-only on the
+            # SAME index (NOT the JSON store, which holds no vectors here).
+            try:
+                return self._redisvl_query(vector, k, threshold=0.0)
+            except Exception:
+                self._use_redisvl = False
+                return self.query(vector, k, threshold=0.0)
 
     def module_filter(self, module: str) -> "FilterExpression | None":
         """Build a module tag filter (or None when redisvl is unavailable)."""
@@ -280,7 +297,7 @@ class VectorIndex:
             if similarity >= threshold:
                 neighbors.append(
                     Neighbor(
-                        key=self._strip_prefix(doc.get("id", "")),
+                        key=doc.get("key") or self._strip_prefix(doc.get("id", "")),
                         score=similarity,
                         meta=self._doc_meta(doc),
                     )

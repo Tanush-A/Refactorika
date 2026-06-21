@@ -35,7 +35,7 @@ def analyze_file(path: str) -> dict:
 
 
 @mcp.tool()
-def find_duplicates(path: str, threshold: float = 0.83) -> dict:
+def find_duplicates(path: str, threshold: float = 0.55) -> dict:
     """Detect duplicate functions in a file or directory (read-only).
 
     Tier 1 (structural): exact-shape clones via AST fingerprint.

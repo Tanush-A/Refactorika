@@ -37,10 +37,17 @@ def _repo_root(p: Path) -> Path:
     return Path(out.stdout.strip()) if out.returncode == 0 else p.parent
 
 
+def _is_test_file(p: Path) -> bool:
+    n = p.name
+    return n.startswith("test_") or n.endswith("_test.py") or n == "conftest.py"
+
+
 def _gather_functions(files: list[Path], root: Path) -> dict[str, dict]:
     """key -> {file, module, name, line, text} for every function in the repo."""
     out: dict[str, dict] = {}
     for f in files:
+        if _is_test_file(f):
+            continue  # test functions look alike but aren't "related logic"
         try:
             source = f.read_text()
         except OSError:

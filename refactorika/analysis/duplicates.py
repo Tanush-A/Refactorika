@@ -44,16 +44,21 @@ if TYPE_CHECKING:
 _SKIP_DIRS = {".venv", "__pycache__", "tests"}
 
 
+def _is_test_file(p: Path) -> bool:
+    """Test files are noise for duplicate detection — they look alike but aren't dupes."""
+    n = p.name
+    return n.startswith("test_") or n.endswith("_test.py") or n == "conftest.py"
+
+
 def _collect_py_files(path: str) -> list[Path]:
-    """Return all .py files under path, skipping unwanted directories."""
+    """Return all .py files under path, skipping caches, tests dirs, and test files."""
     p = Path(path)
     if p.is_file():
-        return [p] if p.suffix == ".py" else []
+        return [p] if p.suffix == ".py" and not _is_test_file(p) else []
 
     result: list[Path] = []
     for child in p.rglob("*.py"):
-        # Skip if any path component is in _SKIP_DIRS
-        if any(part in _SKIP_DIRS for part in child.parts):
+        if any(part in _SKIP_DIRS for part in child.parts) or _is_test_file(child):
             continue
         result.append(child)
     return result
@@ -112,7 +117,7 @@ def find_duplicates(
     path: str,
     storage: "Storage",
     vector_index: "VectorIndex",
-    threshold: float = 0.83,
+    threshold: float = 0.55,
 ) -> dict:
     """Detect duplicate functions in path (file or directory).
 
