@@ -2,22 +2,7 @@
 
 Refactorika is **one interface-agnostic core library** wrapped in a **thin MCP shell**. The core holds all logic — analysis, the gate stack, transforms, Redis Iris memory — and reads/writes state itself, so every entry point (the MCP server, the demo script, the tests) sees the same thing. Claude proposes; the core verifies and remembers.
 
-<<<<<<< HEAD
-- **Primary: MCP server.** Exposes tools so Refactorika plugs into existing MCP-compatible agents (Claude Code, Cursor, etc.) as a refactor plugin, rather than being a standalone IDE:
-  - `run_audit` — runs the convention audit (§ [05-core-components.md](05-core-components.md))
-  - `confirm_convention` — captures the human-confirm decision from the audit
-  - `get_plan` — returns the ordered refactor task list
-  - `check_convention` — checks a proposed edit against the confirmed target convention
-  - `get_impact` — returns known call sites / dependents for a file or symbol
-  - `verify_edit` — runs the full verification-harness gate pipeline (parse → lint → typecheck → tests → call-site/handled-result sweep)
-  - `run_typecheck` — wraps `pyright`
-  - `run_lint` — wraps `ruff` (check + format) on touched files
-  - `run_tests` — wraps `pytest` (scoped to touched files where possible)
-  - `record_edit` — appends a structured record to the per-edit audit log
-- **Fallback: CLI.** `refactorika audit <repo>`, `refactorika plan`, `refactorika check <diff>` — works against git history/diffs directly, for use without a live agent loop wired up.
-=======
 ## Project Layout
->>>>>>> c96dee28d47b378d45255520cb4702fd3e74059a
 
 The canonical package is the top-level **`refactorika/`**. Modules marked *(exists)* are shipped today; *(to build)* are on the build order in [02-scope.md](02-scope.md).
 

@@ -1,10 +1,3 @@
-<<<<<<< HEAD
-# Benchmark data — fetched on demand, never committed (mixed/GPL licenses upstream)
-eval/external/
-
-# Eval virtualenv (created by eval/run_eval.sh)
-eval/.venv/
-
 # Python
 __pycache__/
 *.py[cod]
@@ -14,18 +7,18 @@ venv/
 .pytest_cache/
 .ruff_cache/
 
-# OS / editor
-.DS_Store
-=======
-.venv/
+# Refactorika state + secrets
 .refactorika/
-__pycache__/
-*.pyc
 .env
-demo_repo/.git/
 .claude/worktrees/
 
-# Benchmark data + run artifacts (fetched/generated, never committed)
+# Demo fixture's own git
+demo_repo/.git/
+
+# Eval: benchmark data + run artifacts (fetched/generated, never committed)
 eval/external/
 eval/results/
->>>>>>> c96dee28d47b378d45255520cb4702fd3e74059a
+eval/.venv/
+
+# OS / editor
+.DS_Store

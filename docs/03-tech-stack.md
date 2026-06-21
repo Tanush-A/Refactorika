@@ -1,20 +1,10 @@
 # Tech Stack
 
-<<<<<<< HEAD
-Refactorika itself is written in **Python**; its target codebases are also **Python**.
-=======
 ## Language
->>>>>>> c96dee28d47b378d45255520cb4702fd3e74059a
 
 - **Python 3.11+** — the harness *and* the target it refactors.
 
-<<<<<<< HEAD
-## Delivery / integration layer
-- **MCP server** — the primary delivery form. Exposes tools (`run_audit`, `confirm_convention`, `get_plan`, `check_convention`, `get_impact`, `verify_edit`, `run_typecheck`, `run_lint`, `run_tests`, `record_edit`) so Refactorika plugs into existing MCP-compatible agents (Claude Code, Cursor, etc.) as a refactor plugin, rather than shipping as a standalone IDE.
-- **CLI fallback** — `refactorika audit <repo>`, `refactorika plan`, `refactorika check <diff>` — works directly against git history/diffs without a live agent loop wired up.
-=======
 ## MCP Layer
->>>>>>> c96dee28d47b378d45255520cb4702fd3e74059a
 
 - **`mcp` Python SDK (`FastMCP`)** — exposes Refactorika's capabilities as MCP tools Claude invokes inline during a conversation. The server (`refactorika/mcp_server.py`) is a thin shell over the core library.
 
@@ -22,11 +12,6 @@ Refactorika itself is written in **Python**; its target codebases are also **Pyt
 
 - **`tree-sitter` + `tree-sitter-python`** — AST parsing for all structure-aware analysis: function boundaries, import blocks, nesting depth, normalized structural fingerprints, and the symbol graph used for dead-code reachability.
 
-<<<<<<< HEAD
-- Tree-sitter + grep over a full type-resolver because v1 explicitly doesn't promise IDE-grade accuracy — it's framed honestly as best-effort (see [08-risks-and-scope.md](08-risks-and-scope.md)). (`pyright` is used only as a pass/fail gate on edits, not as the audit's detection engine.)
-- MCP-first because the explicit positioning is "plugin for existing agent loops," not a standalone product — see [01-problem-and-purpose.md](01-problem-and-purpose.md).
-- Redis Iris is chosen because its actual components (Agent Memory, Context Retriever, structured caching) map directly onto Refactorika's existing mechanism (a retrievable rule list + structured call-site lookups), rather than being bolted on for a sponsor track.
-=======
 ## Verification Gate Stack
 
 Every mutation passes these in cheapest-first order, short-circuiting on the first failure (see [04-architecture.md](04-architecture.md)):
@@ -61,4 +46,3 @@ Every mutation passes these in cheapest-first order, short-circuiting on the fir
 
 - **`pytest`** — unit + integration tests for the analysis, transforms, gate stack, and storage fallback.
 </content>
->>>>>>> c96dee28d47b378d45255520cb4702fd3e74059a
