@@ -1,6 +1,16 @@
 # v2 Worklog — gaps between the shipped V2 implementation and `v2_spec.md`
 
-> **STATUS (commit `ca39786`): all buckets A–E done.** Fixed in parallel (Buckets B/C/D via worktree agents, A/E by hand), integrated onto `narrow-scope-anika`, 52 tests passing, demo runs end-to-end showing find_duplicates / find_dead_code / generate_docs. Only the intentionally-deferred `[decide]/[tune]` items (F1–F4) and one newly-discovered issue (G1) remain — both for v3.
+> **STATUS:** all buckets A–E done; demo runs end-to-end (analyze → find_duplicates → find_dead_code → generate_docs → good-edit-commits → bad-edit-caught → dashboard); 52 tests green.
+>
+> **🎯 Hackathon lens (read this first):** This is a hackathon project — the bar is *demo-able*, not production. The review findings below (R1–R16) and G1 are **real but NOT demo-blocking** — atomicity edge cases, rollback corner cases, efficiency, reuse, gate exit-codes. **Do not fix them for the hackathon.** They're kept only as an honest backlog. The single short list that actually matters for the demo is right below.
+
+## ✅ Demo-relevant — the only thing worth touching now
+
+- [ ] **D-now: `find_duplicates` finds nothing in the default (offline) demo.** The planted duplicate (`orders.compute_total` ↔ `billing.calculate_invoice_total`) is a *semantic* near-dup, which needs the `[semantic]` extra (torch) that isn't installed — so the live demo prints "no structural pairs found / semantic unavailable." For a demo whose headline is *"we detect duplicates,"* showing nothing is the weak moment. Two options: **(a)** plant a small *structural* (exact-shape) duplicate in `demo_repo/` so the offline demo shows a real hit (5-min, reliable, no torch), or **(b)** `pip install '.[semantic]'` and demo the semantic catch (heavier, install risk on stage). Recommend (a).
+
+*(Everything else — A–G done/deferred, R1–R16, F1–F4 — is parked. The demo works without any of it.)*
+
+---
 >
 > Found by auditing the `V2 implementation` commit (`5d22f2a`) against `docs/v2_spec.md`. None of these are covered by `docs/13-v3-roadmap.md` (that doc is all *new* features — repo-wide audit, call-site-sweep gate, Sentry). The one overlap: v3 §0 plans to (re)build `analysis/call_graph.py`, so the **Bucket B** dead-code fixes landed here and can be carried into that work.
 >
@@ -64,9 +74,9 @@ Items are grouped into **buckets by the files they touch**. Priority: 🔴 can p
   - Where: `core/analyze.py` caches `AnalysisResult` (with absolute `file`/`location`) keyed on content sha1; same pattern in `dead_code.py`'s new cache (B4) and the vector index meta.
   - Fix: store **repo-relative** paths in cached results (and the `meta`), resolving to absolute only at the boundary; or include the path in the cache key. Flushed Redis (`refactorika:cache`, `refactorika:vectors`) as a stopgap.
 
-## Review findings (`/code-review` over the full branch, commit `ca39786`) ⚠️ all open
+## Post-hackathon backlog — review findings ⏸️ NOT demo-blocking, do not fix for the hackathon
 
-7-angle review of the whole `refactorika/` package. Verified directly against source. Ranked by severity. These are NEW (separate from A–G above).
+7-angle `/code-review` over the whole package. All verified against source and all *real*, but none of them break or degrade the demo — they're production-hardening (atomicity corner cases, gate exit codes, efficiency, reuse). Logged for honesty; **parked** unless a specific one starts biting the demo.
 
 ### 🔴 Critical — behavior/data loss & broken atomicity
 
