@@ -16,6 +16,7 @@ Build a tool that:
 - Audits a codebase for a specific convention (e.g. error-handling style) and reports where it's inconsistent.
 - Produces a safe, dependency-aware order to fix it.
 - Guides an agent through the refactor, checking each edit against the target convention and flagging any missed call sites — without dumping the entire repo into context at every step.
+- Creates context files of the code structure for future software developers and agents to easily understand the refactored codebase.
 
 ## 3. Non-goals (for this build)
 
@@ -63,7 +64,7 @@ Automated guardrails layered on top of guided execution. Every proposed edit pas
 1. **Pre-edit gate** — the proposed edit is parsed with `tree-sitter-typescript`; reject if it fails to parse or does not match the confirmed target variant.
 2. **Post-edit type check** — run `tsc --noEmit` (project scope, or single-file scope where configured) on touched files; if it fails, roll the edit back.
 3. **Call-site sweep** — after a successful edit, re-scan the recorded call sites (AST + grep) to confirm none were left in the old convention; surface any stragglers.
-4. **Reject → re-propose loop** — on any gate failure, surface the failure reason to the agent and let it re-propose, up to a bounded retry count. (This defines the previously-undefined failure path in §5.3.)
+4. **Reject → re-propose loop** — on any gate failure, sursface the failure reason to the agent and let it re-propose, up to a bounded retry count. (This defines the previously-undefined failure path in §5.3.)
 5. **Per-edit audit log** — append a structured record (file, checks run, pass/fail, retry count, final diff) to the local JSON store, powering the demo dashboard.
 
 ## 6. Architecture
