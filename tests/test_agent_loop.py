@@ -104,13 +104,13 @@ def test_loop_classifies_transition_attempt_as_malformed_response() -> None:
 
 
 def test_discovery_budget_is_enforced() -> None:
-    actions = [LoopAction(WorkflowState.DISCOVER, model_calls=1) for _ in range(7)]
+    actions = [LoopAction(WorkflowState.DISCOVER, model_calls=1) for _ in range(9)]
 
     result = AgentLoop(scripted(actions)).run()
 
     assert result.termination_reason is TerminationReason.ITERATION_LIMIT
-    assert result.model_calls == 6
-    assert result.metadata["phase_calls"] == {"discover": 6}
+    assert result.model_calls == 8
+    assert result.metadata["phase_calls"] == {"discover": 8}
 
 
 def test_total_call_budget_is_enforced() -> None:

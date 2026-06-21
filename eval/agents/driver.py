@@ -195,6 +195,12 @@ def developer_tool_schemas() -> list[dict[str, Any]]:
                     "enum": [reason.value for reason in TerminationReason],
                 },
                 "error": {"type": "string"},
+                "replan_rationale": {
+                    "type": "string",
+                    "description": (
+                        "Required for execute-to-plan after a rejected patch."
+                    ),
+                },
             },
             ("next_state",),
         ),
@@ -248,6 +254,9 @@ class SharedAgentDriver:
         self._sequence = 0
         self._last_patch_ok: bool | None = None
         self._plan: RefactorPlan | None = None
+        self._replan_allowed = False
+        self._replan_attempts = 0
+        self._replanned_this_turn = False
         self._completion_repair_attempted = False
         self._baseline = self._source_snapshot()
         self._schemas = developer_tool_schemas()
@@ -350,6 +359,7 @@ class SharedAgentDriver:
                     result = self._invoke(name, arguments)
                 if name == "submit_patch":
                     self._last_patch_ok = result.ok
+                    self._replan_allowed = not result.ok
                     if result.ok:
                         submitted_edits.update(cast(dict[str, str], arguments["edits"]))
                         if plan_step is None:
@@ -368,26 +378,52 @@ class SharedAgentDriver:
         if tool_results:
             self.messages.append({"role": "user", "content": tool_results})
 
+        self._replanned_this_turn = False
         try:
             next_state, plan, reason, error = self._decode_action(
                 state, declaration, submitted=bool(submitted_edits)
             )
         except MalformedResponseError as exc:
-            if state is not WorkflowState.PLAN:
+            is_replan_request = (
+                state is WorkflowState.EXECUTE
+                and declaration is not None
+                and declaration.get("next_state") == WorkflowState.PLAN.value
+            )
+            if state is not WorkflowState.PLAN and not is_replan_request:
                 raise
+            workflow_retries = int(context.metadata.get("workflow_action_retries", 0))
+            if is_replan_request and workflow_retries >= 1:
+                usage = completion.usage
+                return LoopAction(
+                    next_state=state,
+                    model_calls=1,
+                    tool_events=events,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    cache_read_tokens=usage.cache_read_tokens,
+                    cache_write_tokens=usage.cache_write_tokens,
+                    termination_reason=TerminationReason.SAFE_ESCALATION,
+                    error=f"invalid replan action after corrective retry: {exc}",
+                    metadata={
+                        "provider_seconds": completion.seconds,
+                        "workflow_action_retries": workflow_retries,
+                    },
+                )
             self.messages.append(
                 {
                     "role": "user",
                     "content": (
-                        "The planning action was rejected. Return workflow_action again with "
-                        "next_state=execute and a plan satisfying the complete tool schema. "
+                        "The workflow action was rejected. If planning, return "
+                        "workflow_action with next_state=execute and a complete plan. If "
+                        "requesting a replan after a rejected patch, return workflow_action "
+                        "with next_state=plan and a non-empty replan_rationale. "
                         f"Validation error: {exc}"
                     ),
                 }
             )
             usage = completion.usage
             return LoopAction(
-                next_state=WorkflowState.PLAN,
+                next_state=state,
                 model_calls=1,
                 tool_events=events,
                 input_tokens=usage.input_tokens,
@@ -396,10 +432,21 @@ class SharedAgentDriver:
                 cache_write_tokens=usage.cache_write_tokens,
                 metadata={
                     "provider_seconds": completion.seconds,
-                    "planning_schema_retries": int(
-                        context.metadata.get("planning_schema_retries", 0)
-                    )
-                    + 1,
+                    **(
+                        {
+                            "planning_schema_retries": int(
+                                context.metadata.get("planning_schema_retries", 0)
+                            )
+                            + 1
+                        }
+                        if state is WorkflowState.PLAN
+                        else {}
+                    ),
+                    **(
+                        {"workflow_action_retries": workflow_retries + 1}
+                        if is_replan_request
+                        else {}
+                    ),
                 },
             )
         if plan is not None:
@@ -417,7 +464,11 @@ class SharedAgentDriver:
             cache_write_tokens=usage.cache_write_tokens,
             termination_reason=reason,
             error=error,
-            metadata={"provider_seconds": completion.seconds},
+            metadata={
+                "provider_seconds": completion.seconds,
+                "replan_attempts": self._replan_attempts,
+                **({"campaign_replanned": True} if self._replanned_this_turn else {}),
+            },
         )
 
     def _validate_plan_step(self, arguments: dict[str, Any]) -> PlanStep:
@@ -610,7 +661,11 @@ class SharedAgentDriver:
         if declaration is None:
             if submitted and state in {WorkflowState.EXECUTE, WorkflowState.REPAIR}:
                 return WorkflowState.VERIFY, None, None, None
-            if state in {WorkflowState.DISCOVER, WorkflowState.EXECUTE}:
+            if state in {
+                WorkflowState.DISCOVER,
+                WorkflowState.EXECUTE,
+                WorkflowState.REPAIR,
+            }:
                 return state, None, None, None
             raise MalformedResponseError(f"{state.value} requires workflow_action")
         try:
@@ -622,13 +677,48 @@ class SharedAgentDriver:
             raise MalformedResponseError(f"invalid workflow_action: {exc}") from exc
         if state is WorkflowState.PLAN and plan is None:
             raise MalformedResponseError("planning transition requires a structured plan")
-        if state is WorkflowState.DISCOVER and plan is not None and next_state in {
+        if state is WorkflowState.DISCOVER and next_state in {
             WorkflowState.PLAN,
             WorkflowState.EXECUTE,
         }:
             # Selection is a required bookkeeping state but deliberately consumes no
             # model call. Preserve that state without rejecting a combined model action.
             next_state = WorkflowState.SELECT
+        if state is WorkflowState.EXECUTE and next_state is WorkflowState.PLAN:
+            rationale = declaration.get("replan_rationale")
+            if not isinstance(rationale, str) or not rationale.strip():
+                raise MalformedResponseError("replan requires a non-empty replan_rationale")
+            if not self._replan_allowed:
+                raise MalformedResponseError("replan is allowed only after a rejected patch")
+            if self._replan_attempts >= 1:
+                return (
+                    WorkflowState.EXECUTE,
+                    None,
+                    TerminationReason.SAFE_ESCALATION,
+                    "replan budget exhausted",
+                )
+            if not self.abort():
+                return (
+                    WorkflowState.EXECUTE,
+                    None,
+                    TerminationReason.GATE_FAILURE,
+                    "campaign rollback failed before replanning",
+                )
+            self._plan = None
+            self._last_patch_ok = None
+            self._replan_allowed = False
+            self._completion_repair_attempted = False
+            self._replan_attempts += 1
+            self._replanned_this_turn = True
+            self.messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "The campaign was restored to its baseline. Provide a replacement "
+                        "structured plan without broadening beyond the user request."
+                    ),
+                }
+            )
         return next_state, plan, reason, _optional_string(declaration.get("error"))
 
     def _invoke(self, name: str, arguments: dict[str, Any]) -> ToolResult:

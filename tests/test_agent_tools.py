@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -129,3 +130,20 @@ def test_git_tools_are_clean_for_materialized_non_git_fixture(tmp_path: Path) ->
     assert diff.ok and diff.data == ""
     assert status.metadata == {"git_repository": False, "benchmark_baseline_clean": True}
     assert diff.metadata == {"git_repository": False, "benchmark_baseline_clean": True}
+
+
+def test_test_command_can_import_materialized_repository(tmp_path: Path) -> None:
+    (tmp_path / "sample").mkdir()
+    (tmp_path / "sample" / "__init__.py").write_text("VALUE = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_visible.py").write_text(
+        "from sample import VALUE\n\ndef test_value():\n    assert VALUE == 1\n"
+    )
+    tools = DeveloperTools(
+        tmp_path,
+        test_command=(sys.executable, "-m", "pytest", "-q"),
+    )
+
+    result = tools.run_tests()
+
+    assert result.ok, result.data

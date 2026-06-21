@@ -233,6 +233,9 @@ class DeveloperTools:
         started = time.monotonic() if started is None else started
         success_codes = {0} if success_codes is None else success_codes
         try:
+            pythonpath = str(self.repo)
+            if inherited_pythonpath := os.environ.get("PYTHONPATH"):
+                pythonpath += os.pathsep + inherited_pythonpath
             completed = subprocess.run(
                 list(command),
                 cwd=self.repo,
@@ -240,7 +243,11 @@ class DeveloperTools:
                 text=True,
                 timeout=self.timeout,
                 check=False,
-                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+                env={
+                    **os.environ,
+                    "GIT_OPTIONAL_LOCKS": "0",
+                    "PYTHONPATH": pythonpath,
+                },
             )
             output, truncated = self._bounded(completed.stdout + completed.stderr)
             status = "ok" if completed.returncode in success_codes else "error"
