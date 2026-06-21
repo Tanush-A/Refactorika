@@ -31,7 +31,7 @@ benchmark-agent:  ## Run the shared-patch verification ablation
 		--input-cost-per-mtok "$${INPUT_COST_PER_MTOK:-0}" \
 		--output-cost-per-mtok "$${OUTPUT_COST_PER_MTOK:-0}"
 
-benchmark-full-calibrate:  ## Validate the nine full-system case baselines
+benchmark-full-calibrate:  ## Validate all full-system case baselines
 	@test -x eval/.venv/bin/python || bash eval/run_eval.sh --setup
 	PATH="$(CURDIR)/eval/.venv/bin:$$PATH" eval/.venv/bin/python \
 		-m eval.full_system_bench --calibrate-only

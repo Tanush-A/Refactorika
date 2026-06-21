@@ -54,7 +54,7 @@ class ScriptedBackend:
 
 
 def test_case_adapter_normalizes_all_fixture_families() -> None:
-    assert len(CASES) == 9
+    assert len(CASES) == 47
     assert {case.user_prompt for case in CASES} == {"refactor this codebase"}
     assert all(case.hidden_tests for case in CASES)
     assert all(path.startswith("tests/oracle/") for case in CASES for path in case.hidden_tests)
@@ -176,3 +176,52 @@ def test_provider_configuration_failure_invalidates_run_without_retrying() -> No
     assert result["status"] == "invalid-infrastructure"
     assert backend.calls == 2  # one attempt per arm; configuration retries cannot help
     assert result["aggregate"]["reliability"]["configuration_failures"] == 2
+
+
+class ScriptedHarnessBackend:
+    """Test double: returns a known-good edit via the agentic+mcp interface."""
+
+    name = "scripted+mcp"
+
+    def run(
+        self, repo: Path, user_prompt: str
+    ) -> tuple[dict[str, str], Usage, float, "str | None", int]:
+        content = (
+            "from collections.abc import Iterable\n\n\n"
+            "def billable_event_ids(events: Iterable[dict[str, object]]) -> list[str]:\n"
+            "    selected: list[str] = []\n"
+            "    for event in events:\n"
+            "        if event.get('enabled') is not True:\n"
+            "            continue\n"
+            "        if event.get('kind') == 'heartbeat':\n"
+            "            continue\n"
+            "        event_id = event.get('id')\n"
+            "        if not (isinstance(event_id, str) and event_id):\n"
+            "            continue\n"
+            "        selected.append(event_id)\n"
+            "    return selected\n"
+        )
+        edits = {"app/events.py": content}
+        return edits, Usage(), 0.0, None, 1
+
+
+def test_agentic_mcp_arm_appears_in_records() -> None:
+    backend = ScriptedBackend()
+    mcp_backend = ScriptedHarnessBackend()
+    result = run(
+        backend,
+        (adapt_case(GUARD_CLAUSES),),
+        trials=1,
+        max_retries=0,
+        agentic_mcp_backend=mcp_backend,
+    )
+    arms = {r["arm"] for r in result["records"]}
+    assert "agentic+mcp" in arms
+    assert "paired_agentic_mcp_vs_off" in result["aggregate"]
+    assert "paired_agentic_mcp_vs_agentic" in result["aggregate"]
+    mcp_record = next(r for r in result["records"] if r["arm"] == "agentic+mcp")
+    assert mcp_record["status"] == "shipped"
+    assert "tokens" in mcp_record
+    assert "timing" in mcp_record
+    assert "end_to_end_seconds" in mcp_record["timing"]
+    assert "change" in mcp_record

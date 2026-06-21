@@ -44,12 +44,16 @@ make benchmark-full-calibrate
 TRIALS=1 MODEL=claude-sonnet-4-5-20250929 make benchmark-full-agent
 ```
 
-The nine cases cover behavior traps, multi-file call sites and compatibility,
-and verification/recovery failures. Results are written to
+The 47 cases cover behavior traps, multi-file call sites and compatibility,
+verification/recovery failures, async and resource safety, serialization,
+mutation, typing, ordering, filesystem, performance, and adversarial scope.
+Results are written to
 `eval/results/full-system-latest.json`.
 
 See [../docs/13-full-system-benchmark.md](../docs/13-full-system-benchmark.md)
 for the full experimental contract.
+See [../docs/14-benchmark-case-catalog-and-stress-plan.md](../docs/14-benchmark-case-catalog-and-stress-plan.md)
+for the current case catalog, known coverage gaps, and proposed stress suite.
 
 ## Shared-patch verification ablation
 
@@ -98,7 +102,7 @@ No `make`? Call the script directly: `bash eval/run_eval.sh`.
 - `harness_bench.py` — calibrated paired harness benchmark and model adapter.
 - `harness_tasks.py` — ten controlled tasks plus reference-good/bad patches.
 - `full_system_bench.py` — independent-agent full-system benchmark runner.
-- `full_system_cases/` — nine hidden-oracle full-system case repositories.
+- `full_system_cases/` — 47 hidden-oracle full-system case repositories.
 - `requirements.txt` — eval dependencies (tree-sitter, pyright, ruff, pytest).
 - `fetch_benchmarks.sh` — clones external benchmark data into `external/` (gitignored).
 - `external/` — **gitignored.** Fetched benchmark data (RefactorBench). Never committed (mixed/GPL upstream licenses).

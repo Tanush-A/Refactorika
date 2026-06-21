@@ -36,12 +36,18 @@ system-level tradeoff.
 
 ## Cases and grading
 
-The nine controlled cases cover:
+The 47 controlled cases cover:
 
 - behavior preservation across rounding, loop control flow, and near-duplicate
   semantics;
 - multi-file renames, moves, call-site updates, re-exports, and compatibility;
 - visible-test regression catches, type failures, and retry exhaustion.
+- numeric boundaries, nested control flow, mutation, error chaining, generators,
+  recursion, ordering, and cleanup;
+- dependency topology, dynamic plugins, public signatures, dataclass/enum
+  contracts, type protocols, generated files, and same-named decoys;
+- async cancellation and ordering, transaction rollback, serialization,
+  filesystem confinement, middleware order, caching, and resource safety.
 
 Only baseline files are materialized for an agent. Oracle tests remain in the
 evaluator and are injected after the final patch. Structural checks are also
@@ -88,7 +94,7 @@ run.
 # Validate that baselines preserve behavior and still contain refactoring work.
 make benchmark-full-calibrate
 
-# Full run: nine cases x three trials x two arms.
+# Full run: 47 cases x three trials x two arms.
 MODEL=claude-sonnet-4-5-20250929 make benchmark-full-agent
 
 # Optional cost accounting and aggregate regression warning.
@@ -113,3 +119,6 @@ handles specific failure modes; they do not establish general performance over
 arbitrary production repositories. Run multiple trials and report raw counts,
 not only percentages. Do not combine these results with the shared-patch
 verification ablation because the interventions and experimental units differ.
+
+For a case-by-case map of the current suite and the proposed 120-case stress
+catalog, see [14-benchmark-case-catalog-and-stress-plan.md](14-benchmark-case-catalog-and-stress-plan.md).

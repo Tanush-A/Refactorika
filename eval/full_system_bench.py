@@ -29,8 +29,12 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from refactorika.analysis.audit import build_plan
+from refactorika.analysis.dead_code import find_dead_code as _rf_find_dead_code
+from refactorika.analysis.duplicates import find_duplicates as _rf_find_duplicates
+from refactorika.core.analyze import analyze_file as _rf_analyze_file
 from refactorika.core.storage import Storage
 from refactorika.harness import mark_escalated, verify_edits
+from refactorika.memory.vector_index import VectorIndex
 from refactorika.observability import (
     capture_benchmark_regression,
     capture_exception,
@@ -41,6 +45,10 @@ from eval.full_system_cases import ALL_CASES, USER_PROMPT
 from eval.full_system_cases.behavior import BehaviorCase
 from eval.full_system_cases.multifile import MultiFileCase, structural_failures
 from eval.full_system_cases.recovery import RecoveryCase
+from eval.full_system_cases.stress import (
+    StressCase,
+    structural_failures as stress_failures,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REQUIRED_GATES = ("lint", "typecheck", "tests")
@@ -49,7 +57,7 @@ REQUIRED_GATES = ("lint", "typecheck", "tests")
 @dataclass(frozen=True)
 class CaseAdapter:
     name: str
-    source: BehaviorCase | MultiFileCase | RecoveryCase
+    source: BehaviorCase | MultiFileCase | RecoveryCase | StressCase
     baseline_files: dict[str, str]
     hidden_tests: dict[str, str]
     user_prompt: str
@@ -136,17 +144,23 @@ class Backend(Protocol):
 
 
 def adapt_case(case: object) -> CaseAdapter:
-    """Normalize the three fixture families into one runner contract."""
+    """Normalize fixture families into one runner contract."""
 
     if isinstance(case, BehaviorCase):
         hidden = dict(case.hidden_tests)
         required = frozenset(
             expectation.target_path for expectation in case.structural_expectations
         )
-    elif isinstance(case, (MultiFileCase, RecoveryCase)):
+    elif isinstance(case, (MultiFileCase, RecoveryCase, StressCase)):
         hidden = {"tests/oracle/test_hidden.py": case.hidden_tests}
         if isinstance(case, MultiFileCase):
             required = frozenset(expectation.path for expectation in case.expectations)
+        elif isinstance(case, StressCase):
+            required = frozenset(
+                expectation.path
+                for expectation in case.expectations
+                if expectation.kind != "unchanged"
+            )
         else:
             required = frozenset(
                 path
@@ -307,6 +321,36 @@ def propose_on(
     return _decode_patch(backend.complete(prompt), prompt, harness_prompt)
 
 
+def propose_agentic(backend: "AgenticBackend", case: CaseAdapter, repo: Path) -> Proposal:
+    edits, usage, seconds, error, model_calls = backend.run(repo, case.user_prompt)
+    if not error and not edits:
+        error = "agent made no changes to source files"
+    return Proposal(
+        edits=edits if not error else {},
+        usage=usage,
+        seconds=seconds,
+        prompt=f"[agentic:{backend.name}] {case.user_prompt}",
+        error=error,
+        model_calls=model_calls,
+    )
+
+
+def propose_agentic_mcp(
+    backend: "AgenticHarnessBackend", case: CaseAdapter, repo: Path
+) -> Proposal:
+    edits, usage, seconds, error, model_calls = backend.run(repo, case.user_prompt)
+    if not error and not edits:
+        error = "agent made no changes to source files"
+    return Proposal(
+        edits=edits if not error else {},
+        usage=usage,
+        seconds=seconds,
+        prompt=f"[agentic+mcp:{backend.name}] {case.user_prompt}",
+        error=error,
+        model_calls=model_calls,
+    )
+
+
 def _write_patch(repo: Path, edits: dict[str, str]) -> str | None:
     if not edits:
         return "proposal contains no edits"
@@ -359,6 +403,8 @@ def grade_structure(case: CaseAdapter, repo: Path) -> list[str]:
         return structural_failures(case.source, repo)
     if isinstance(case.source, BehaviorCase):
         return _behavior_structure_failures(case.source, repo)
+    if isinstance(case.source, StressCase):
+        return stress_failures(case.source, repo)
     changed = any(
         (repo / path).is_file() and (repo / path).read_text() != content
         for path, content in case.baseline_files.items()
@@ -521,6 +567,8 @@ def _run_pair(
     trial: int,
     max_retries: int,
     pricing: Pricing,
+    agentic_backend: "AgenticBackend | None" = None,
+    agentic_mcp_backend: "AgenticHarnessBackend | None" = None,
 ) -> list[dict]:
     with tempfile.TemporaryDirectory(prefix=f"full-{case.name}-") as tmp:
         pair_root = Path(tmp)
@@ -659,7 +707,7 @@ def _run_pair(
         on_end_to_end = time.perf_counter() - on_started
 
         common = {"case": case.name, "trial": trial, "initial_user_prompt": case.user_prompt}
-        return [
+        records = [
             {
                 **common,
                 "arm": "off",
@@ -724,19 +772,99 @@ def _run_pair(
             },
         ]
 
+        if agentic_backend is not None:
+            agentic_repo = materialize(case, Path(tmp) / "agentic")
+            agentic_started = time.perf_counter()
+            agentic = propose_agentic(agentic_backend, case, agentic_repo)
+            agentic_end_to_end = time.perf_counter() - agentic_started
+            agentic_landed = not bool(agentic.error)
+            agentic_behavior, agentic_detail, agentic_structure = (
+                oracle_grade(case, agentic_repo)
+                if agentic_landed
+                else (False, agentic.error or "not landed", [])
+            )
+            agentic_outcome = _outcome(agentic_landed, agentic_behavior, agentic_structure)
+            records.append({
+                **common,
+                "arm": "agentic",
+                "status": "shipped" if agentic_landed else "error",
+                **agentic_outcome,
+                "oracle_pass": agentic_behavior if agentic_landed else None,
+                "structural_failures": agentic_structure,
+                "detail": agentic_detail,
+                "tokens": agentic.usage.total,
+                "seconds": round(agentic.seconds, 3),
+                "initial": dict(agentic_outcome),
+                "usage": _usage_record(agentic.usage, agentic.model_calls, pricing),
+                "timing": {
+                    "audit_seconds": 0.0,
+                    "model_seconds": round(agentic.seconds, 3),
+                    "gate_seconds": 0.0,
+                    "application_seconds": 0.0,
+                    "grading_seconds": 0.0,
+                    "workflow_seconds": round(agentic.seconds, 3),
+                    "end_to_end_seconds": round(agentic_end_to_end, 3),
+                },
+                "change": _change_metrics(case, agentic.edits, agentic_structure),
+                "plan": None,
+                "patch": agentic.edits,
+            })
+
+        if agentic_mcp_backend is not None:
+            agentic_mcp_repo = materialize(case, Path(tmp) / "agentic_mcp")
+            agentic_mcp_started = time.perf_counter()
+            agentic_mcp = propose_agentic_mcp(agentic_mcp_backend, case, agentic_mcp_repo)
+            agentic_mcp_end_to_end = time.perf_counter() - agentic_mcp_started
+            agentic_mcp_landed = not bool(agentic_mcp.error)
+            agentic_mcp_behavior, agentic_mcp_detail, agentic_mcp_structure = (
+                oracle_grade(case, agentic_mcp_repo)
+                if agentic_mcp_landed
+                else (False, agentic_mcp.error or "not landed", [])
+            )
+            agentic_mcp_outcome = _outcome(
+                agentic_mcp_landed, agentic_mcp_behavior, agentic_mcp_structure
+            )
+            records.append({
+                **common,
+                "arm": "agentic+mcp",
+                "status": "shipped" if agentic_mcp_landed else "error",
+                **agentic_mcp_outcome,
+                "oracle_pass": agentic_mcp_behavior if agentic_mcp_landed else None,
+                "structural_failures": agentic_mcp_structure,
+                "detail": agentic_mcp_detail,
+                "tokens": agentic_mcp.usage.total,
+                "seconds": round(agentic_mcp.seconds, 3),
+                "initial": dict(agentic_mcp_outcome),
+                "usage": _usage_record(agentic_mcp.usage, agentic_mcp.model_calls, pricing),
+                "timing": {
+                    "audit_seconds": 0.0,
+                    "model_seconds": round(agentic_mcp.seconds, 3),
+                    "gate_seconds": 0.0,
+                    "application_seconds": 0.0,
+                    "grading_seconds": 0.0,
+                    "workflow_seconds": round(agentic_mcp.seconds, 3),
+                    "end_to_end_seconds": round(agentic_mcp_end_to_end, 3),
+                },
+                "change": _change_metrics(case, agentic_mcp.edits, agentic_mcp_structure),
+                "plan": None,
+                "patch": agentic_mcp.edits,
+            })
+
+        return records
+
 
 def _clustered_delta_ci(
-    records: list[dict], field: str, *, samples: int = 5000, seed: int = 7
+    records: list[dict], field: str, *, arm_a: str = "on", arm_b: str = "off", samples: int = 5000, seed: int = 7
 ) -> list[float]:
     by_case: dict[str, list[float]] = {}
     pairs: dict[tuple[str, int], dict[str, dict]] = {}
     for record in records:
         pairs.setdefault((record["case"], record["trial"]), {})[record["arm"]] = record
     for (case, _), pair in pairs.items():
-        if set(pair) != {"off", "on"}:
+        if arm_a not in pair or arm_b not in pair:
             continue
-        on_value = pair["on"][field]
-        off_value = pair["off"][field]
+        on_value = pair[arm_a][field]
+        off_value = pair[arm_b][field]
         by_case.setdefault(case, []).append(float(on_value) - float(off_value))
     case_deltas = [sum(values) / len(values) for values in by_case.values()]
     if not case_deltas:
@@ -748,30 +876,33 @@ def _clustered_delta_ci(
     return [round(draws[int(samples * 0.025)], 3), round(draws[int(samples * 0.975)], 3)]
 
 
-def _paired_summary(records: list[dict], field: str) -> dict[str, object]:
+def _paired_summary(
+    records: list[dict], field: str, *, arm_a: str = "on", arm_b: str = "off"
+) -> dict[str, object]:
     pairs: dict[tuple[str, int], dict[str, dict]] = {}
     for record in records:
         pairs.setdefault((record["case"], record["trial"]), {})[record["arm"]] = record
     wins = losses = ties = 0
     for pair in pairs.values():
-        if set(pair) != {"off", "on"}:
+        if arm_a not in pair or arm_b not in pair:
             continue
-        on_value = bool(pair["on"][field])
-        off_value = bool(pair["off"][field])
-        wins += on_value and not off_value
-        losses += off_value and not on_value
-        ties += on_value == off_value
+        a_value = bool(pair[arm_a][field])
+        b_value = bool(pair[arm_b][field])
+        wins += a_value and not b_value
+        losses += b_value and not a_value
+        ties += a_value == b_value
     return {
-        "on_wins": wins,
-        "off_wins": losses,
+        f"{arm_a}_wins": wins,
+        f"{arm_b}_wins": losses,
         "ties": ties,
-        "on_minus_off_ci95_case_clustered": _clustered_delta_ci(records, field),
+        f"{arm_a}_minus_{arm_b}_ci95_case_clustered": _clustered_delta_ci(records, field, arm_a=arm_a, arm_b=arm_b),
     }
 
 
 def aggregate(records: list[dict]) -> dict[str, object]:
+    arms_present = sorted({row["arm"] for row in records})
     arms: dict[str, dict[str, object]] = {}
-    for arm in ("off", "on"):
+    for arm in arms_present:
         rows = [row for row in records if row["arm"] == arm]
         count = len(rows)
         case_rates: dict[str, float] = {}
@@ -858,7 +989,7 @@ def aggregate(records: list[dict]) -> dict[str, object]:
         for attempt in all_attempts
         if attempt.get("error_class") is not None
     ]
-    return {
+    result: dict[str, object] = {
         "arms": arms,
         "paired_final": _paired_summary(records, "correct_landed"),
         "paired_initial": _paired_summary(
@@ -894,6 +1025,18 @@ def aggregate(records: list[dict]) -> dict[str, object]:
             "invalid_patches": proposal_errors.count("invalid_patch"),
         },
     }
+    if "agentic" in arms_present:
+        result["paired_agentic_vs_off"] = _paired_summary(
+            records, "correct_landed", arm_a="agentic", arm_b="off"
+        )
+    if "agentic+mcp" in arms_present:
+        result["paired_agentic_mcp_vs_off"] = _paired_summary(
+            records, "correct_landed", arm_a="agentic+mcp", arm_b="off"
+        )
+        result["paired_agentic_mcp_vs_agentic"] = _paired_summary(
+            records, "correct_landed", arm_a="agentic+mcp", arm_b="agentic"
+        )
+    return result
 
 
 def run(
@@ -902,13 +1045,15 @@ def run(
     trials: int,
     max_retries: int,
     pricing: Pricing | None = None,
+    agentic_backend: "AgenticBackend | None" = None,
+    agentic_mcp_backend: "AgenticHarnessBackend | None" = None,
 ) -> dict:
     pricing = pricing or Pricing()
     run_id = uuid.uuid4().hex
     records: list[dict] = []
     for trial in range(trials):
         for case in cases:
-            records.extend(_run_pair(case, backend, trial, max_retries, pricing))
+            records.extend(_run_pair(case, backend, trial, max_retries, pricing, agentic_backend, agentic_mcp_backend))
     aggregate_result = aggregate(records)
     reliability = cast(dict[str, int], aggregate_result["reliability"])
     infrastructure_failures = (
@@ -1050,6 +1195,496 @@ class HttpBackend:
             )
 
 
+_AGENTIC_TOOLS: list[dict] = [
+    {
+        "name": "list_files",
+        "description": "List Python source files in the repository (excludes __pycache__ and .venv).",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "read_file",
+        "description": "Read the contents of a file.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path relative to repository root"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "write_file",
+        "description": "Write complete new content to a source file. Rejected for paths under tests/.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path relative to repository root"},
+                "content": {"type": "string", "description": "Complete new file content"},
+            },
+            "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "run_bash",
+        "description": "Run a shell command in the repository root. Output is capped at 2 000 chars.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Shell command to execute"},
+            },
+            "required": ["command"],
+        },
+    },
+]
+
+_AGENTIC_SYSTEM = (
+    "You are an autonomous Python refactoring agent. "
+    "Use tools to explore the repository, apply behavior-preserving structural refactors, "
+    "and verify your work by running tests. Do not edit or create any files under tests/. "
+    "Stop calling tools once the refactoring is complete and tests pass."
+)
+
+_AGENTIC_MCP_TOOLS: list[dict] = [
+    {
+        "name": "list_files",
+        "description": "List Python source files in the repository (excludes __pycache__ and .venv).",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "read_file",
+        "description": "Read the contents of a file.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path relative to repository root"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "analyze_file",
+        "description": (
+            "Run Refactorika structural analysis on a file or directory. "
+            "Returns ranked opportunities: long functions, deep nesting, import issues, etc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path relative to repository root"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "find_duplicates",
+        "description": (
+            "Find duplicate or near-duplicate functions in a file or directory "
+            "using structural fingerprinting and semantic similarity."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path relative to repository root"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "find_dead_code",
+        "description": (
+            "Find unreachable symbols via call-graph reachability analysis. "
+            "Returns dead functions/classes ranked by confidence."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path relative to repository root"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "apply_and_verify",
+        "description": (
+            "Submit a mutation for verification. Runs parse → ruff → pyright → pytest. "
+            "Commits the file on success; rolls back atomically and returns diagnostics on failure. "
+            "This is the ONLY way to modify source files — do not use write_file."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path relative to repository root"},
+                "new_content": {"type": "string", "description": "Complete new file content"},
+                "refactor_kind": {
+                    "type": "string",
+                    "description": "Kind of refactor: e.g. flatten_nesting, extract_function, consolidate_duplicate, remove_dead_code",
+                },
+            },
+            "required": ["path", "new_content", "refactor_kind"],
+        },
+    },
+    {
+        "name": "run_bash",
+        "description": "Run a read-only shell command (e.g. grep, cat). Output capped at 2 000 chars.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Shell command to execute"},
+            },
+            "required": ["command"],
+        },
+    },
+]
+
+_AGENTIC_MCP_SYSTEM = (
+    "You are an autonomous Python refactoring agent with access to Refactorika's analysis tools. "
+    "Workflow: (1) list_files; (2) analyze_file on each source file to find the highest-value "
+    "opportunity — do NOT also call find_duplicates or find_dead_code unless analyze_file "
+    "explicitly surfaces a duplicate or dead-code issue; (3) read the file; (4) submit the "
+    "refactored content immediately via apply_and_verify — it runs parse, lint, type-check, and "
+    "tests internally and rolls back with diagnostics on failure; (5) repair from the diagnostics "
+    "and retry. "
+    "You MUST use apply_and_verify for all mutations — you cannot write files directly. "
+    "Do NOT use run_bash to run tests or check the environment — apply_and_verify handles all "
+    "verification. Do not touch files under tests/. Stop when apply_and_verify reports committed."
+)
+
+
+class AgenticBackend:
+    """Tool-use agentic arm: explores and edits files directly via a multi-turn loop."""
+
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        max_iterations: int = 20,
+        bash_timeout: int = 30,
+    ) -> None:
+        self.model = model
+        self.name = f"{model}+tools"
+        self._api_key = api_key
+        self.max_iterations = max_iterations
+        self.bash_timeout = bash_timeout
+
+    def _api_call(self, messages: list[dict]) -> tuple[list[dict], Usage, str | None]:
+        url = "https://api.anthropic.com/v1/messages"
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": self._api_key,
+            "anthropic-version": "2023-06-01",
+        }
+        body = {
+            "model": self.model,
+            "max_tokens": 8192,
+            "temperature": 0,
+            "system": _AGENTIC_SYSTEM,
+            "tools": _AGENTIC_TOOLS,
+            "messages": messages,
+        }
+        try:
+            req = urllib.request.Request(url, json.dumps(body).encode(), headers, method="POST")
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                data = json.loads(resp.read())
+            raw = data.get("usage", {})
+            usage = Usage(
+                input_tokens=int(raw.get("input_tokens", 0)),
+                output_tokens=int(raw.get("output_tokens", 0)),
+                cache_read_tokens=int(raw.get("cache_read_input_tokens", 0)),
+                cache_write_tokens=int(raw.get("cache_creation_input_tokens", 0)),
+            )
+            return data["content"], usage, None
+        except (urllib.error.URLError, TimeoutError, KeyError, ValueError, json.JSONDecodeError) as exc:
+            return [], Usage(), str(exc)
+
+    def _execute(self, repo: Path, name: str, inputs: dict) -> str:
+        if name == "list_files":
+            files = sorted(
+                p.relative_to(repo).as_posix()
+                for p in repo.rglob("*.py")
+                if not any(part in {".venv", "__pycache__", ".git"} for part in p.parts)
+            )
+            return "\n".join(files) or "(no Python files)"
+
+        if name == "read_file":
+            path = inputs.get("path", "")
+            target = (repo / path).resolve()
+            try:
+                target.relative_to(repo.resolve())
+            except ValueError:
+                return "error: path escapes repository"
+            return target.read_text() if target.is_file() else f"error: {path} not found"
+
+        if name == "write_file":
+            path = inputs.get("path", "")
+            content = inputs.get("content", "")
+            if path.startswith("tests/"):
+                return "error: writes to tests/ are not permitted"
+            target = (repo / path).resolve()
+            try:
+                target.relative_to(repo.resolve())
+            except ValueError:
+                return "error: path escapes repository"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+            return f"wrote {path}"
+
+        if name == "run_bash":
+            command = inputs.get("command", "")
+            try:
+                proc = subprocess.run(
+                    command,
+                    shell=True,
+                    cwd=repo,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.bash_timeout,
+                )
+                out = (proc.stdout + proc.stderr).strip()
+            except subprocess.TimeoutExpired:
+                return f"exit 124\ntimeout after {self.bash_timeout}s"
+            if len(out) > 2000:
+                out = out[:2000] + "\n...[truncated]"
+            return f"exit {proc.returncode}\n{out}" if out else f"exit {proc.returncode}"
+
+        return f"error: unknown tool {name!r}"
+
+    def run(
+        self, repo: Path, user_prompt: str
+    ) -> tuple[dict[str, str], Usage, float, str | None, int]:
+        before = {
+            p.relative_to(repo).as_posix(): p.read_text()
+            for p in sorted(repo.rglob("*.py"))
+            if not any(part in {".venv", "__pycache__", ".git"} for part in p.parts)
+        }
+        messages: list[dict] = [{"role": "user", "content": user_prompt}]
+        usage = Usage()
+        started = time.perf_counter()
+        error: str | None = None
+        model_calls = 0
+
+        for _ in range(self.max_iterations):
+            content, turn_usage, call_error = self._api_call(messages)
+            model_calls += 1
+            usage.add(turn_usage)
+            if call_error:
+                error = call_error
+                break
+            messages.append({"role": "assistant", "content": content})
+            tool_calls = [b for b in content if b.get("type") == "tool_use"]
+            if not tool_calls:
+                break
+            results = [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": call["id"],
+                    "content": self._execute(repo, call["name"], call.get("input", {})),
+                }
+                for call in tool_calls
+            ]
+            messages.append({"role": "user", "content": results})
+
+        seconds = round(time.perf_counter() - started, 3)
+        after = {
+            p.relative_to(repo).as_posix(): p.read_text()
+            for p in sorted(repo.rglob("*.py"))
+            if not any(part in {".venv", "__pycache__", ".git"} for part in p.parts)
+        }
+        edits = {path: text for path, text in after.items() if before.get(path) != text}
+        return edits, usage, seconds, error, model_calls
+
+
+class AgenticHarnessBackend:
+    """Agentic arm with Refactorika MCP tools: analysis + apply_and_verify gate stack."""
+
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        max_iterations: int = 20,
+        bash_timeout: int = 30,
+    ) -> None:
+        self.model = model
+        self.name = f"{model}+mcp"
+        self._api_key = api_key
+        self.max_iterations = max_iterations
+        self.bash_timeout = bash_timeout
+
+    def _api_call(self, messages: list[dict]) -> tuple[list[dict], Usage, str | None]:
+        url = "https://api.anthropic.com/v1/messages"
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": self._api_key,
+            "anthropic-version": "2023-06-01",
+        }
+        body = {
+            "model": self.model,
+            "max_tokens": 8192,
+            "temperature": 0,
+            "system": _AGENTIC_MCP_SYSTEM,
+            "tools": _AGENTIC_MCP_TOOLS,
+            "messages": messages,
+        }
+        try:
+            req = urllib.request.Request(url, json.dumps(body).encode(), headers, method="POST")
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                data = json.loads(resp.read())
+            raw = data.get("usage", {})
+            usage = Usage(
+                input_tokens=int(raw.get("input_tokens", 0)),
+                output_tokens=int(raw.get("output_tokens", 0)),
+                cache_read_tokens=int(raw.get("cache_read_input_tokens", 0)),
+                cache_write_tokens=int(raw.get("cache_creation_input_tokens", 0)),
+            )
+            return data["content"], usage, None
+        except (urllib.error.URLError, TimeoutError, KeyError, ValueError, json.JSONDecodeError) as exc:
+            return [], Usage(), str(exc)
+
+    def _execute(self, repo: Path, storage: Storage, name: str, inputs: dict) -> str:
+        if name == "list_files":
+            files = sorted(
+                p.relative_to(repo).as_posix()
+                for p in repo.rglob("*.py")
+                if not any(part in {".venv", "__pycache__", ".git"} for part in p.parts)
+            )
+            return "\n".join(files) or "(no Python files)"
+
+        if name == "read_file":
+            path = inputs.get("path", "")
+            target = (repo / path).resolve()
+            try:
+                target.relative_to(repo.resolve())
+            except ValueError:
+                return "error: path escapes repository"
+            return target.read_text() if target.is_file() else f"error: {path} not found"
+
+        if name == "analyze_file":
+            path = inputs.get("path", "")
+            target = repo / path
+            if not target.exists():
+                return f"error: {path} not found"
+            try:
+                result = _rf_analyze_file(str(target), storage)
+                return json.dumps(
+                    result.to_dict() if hasattr(result, "to_dict") else vars(result),
+                    default=str,
+                )
+            except Exception as exc:
+                return f"error: {exc}"
+
+        if name == "find_duplicates":
+            path = inputs.get("path", "")
+            target = repo / path
+            if not target.exists():
+                return f"error: {path} not found"
+            try:
+                vi = VectorIndex(storage)
+                result = _rf_find_duplicates(str(target), storage, vi)
+                return json.dumps(result, default=str)
+            except Exception as exc:
+                return f"error: {exc}"
+
+        if name == "find_dead_code":
+            path = inputs.get("path", "")
+            target = repo / path
+            if not target.exists():
+                return f"error: {path} not found"
+            try:
+                result = _rf_find_dead_code(str(target), storage)
+                return json.dumps(result, default=str)
+            except Exception as exc:
+                return f"error: {exc}"
+
+        if name == "apply_and_verify":
+            path = inputs.get("path", "")
+            new_content = inputs.get("new_content", "")
+            refactor_kind = inputs.get("refactor_kind", "refactor")
+            if path.startswith("tests/"):
+                return "error: cannot apply_and_verify on test files"
+            target = (repo / path).resolve()
+            try:
+                target.relative_to(repo.resolve())
+            except ValueError:
+                return "error: path escapes repository"
+            try:
+                record = verify_edits(
+                    repo,
+                    {path: new_content},
+                    test_command=[sys.executable, "-m", "pytest", "-q"],
+                    required_gates=REQUIRED_GATES,
+                )
+                if record.status == "committed":
+                    return f"committed: {path} ({refactor_kind})"
+                return f"rolled-back: {json.dumps(record.gate_details, sort_keys=True)}"
+            except ValueError as exc:
+                return f"error: {exc}"
+
+        if name == "run_bash":
+            command = inputs.get("command", "")
+            try:
+                proc = subprocess.run(
+                    command,
+                    shell=True,
+                    cwd=repo,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.bash_timeout,
+                )
+                out = (proc.stdout + proc.stderr).strip()
+            except subprocess.TimeoutExpired:
+                return f"exit 124\ntimeout after {self.bash_timeout}s"
+            if len(out) > 2000:
+                out = out[:2000] + "\n...[truncated]"
+            return f"exit {proc.returncode}\n{out}" if out else f"exit {proc.returncode}"
+
+        return f"error: unknown tool {name!r}"
+
+    def run(
+        self, repo: Path, user_prompt: str
+    ) -> tuple[dict[str, str], Usage, float, str | None, int]:
+        storage = Storage(redis_url=None, json_path=repo / ".refactorika" / "bench-state.json")
+
+        before = {
+            p.relative_to(repo).as_posix(): p.read_text()
+            for p in sorted(repo.rglob("*.py"))
+            if not any(part in {".venv", "__pycache__", ".git"} for part in p.parts)
+        }
+        messages: list[dict] = [{"role": "user", "content": user_prompt}]
+        usage = Usage()
+        started = time.perf_counter()
+        error: str | None = None
+        model_calls = 0
+
+        for _ in range(self.max_iterations):
+            content, turn_usage, call_error = self._api_call(messages)
+            model_calls += 1
+            usage.add(turn_usage)
+            if call_error:
+                error = call_error
+                break
+            messages.append({"role": "assistant", "content": content})
+            tool_calls = [b for b in content if b.get("type") == "tool_use"]
+            if not tool_calls:
+                break
+            results = [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": call["id"],
+                    "content": self._execute(repo, storage, call["name"], call.get("input", {})),
+                }
+                for call in tool_calls
+            ]
+            messages.append({"role": "user", "content": results})
+
+        seconds = round(time.perf_counter() - started, 3)
+        after = {
+            p.relative_to(repo).as_posix(): p.read_text()
+            for p in sorted(repo.rglob("*.py"))
+            if not any(part in {".venv", "__pycache__", ".git"} for part in p.parts)
+        }
+        edits = {path: text for path, text in after.items() if before.get(path) != text}
+        return edits, usage, seconds, error, model_calls
+
+
 def main() -> int:
     init_sentry("benchmark")
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1067,8 +1702,31 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--regression-threshold", type=float, default=0.10)
+    parser.add_argument("--agentic", action="store_true", help="add agentic tool-use arm (requires ANTHROPIC_API_KEY)")
+    parser.add_argument("--agentic-model", default="claude-sonnet-4-5-20250929")
+    parser.add_argument("--agentic-max-iter", type=int, default=20)
+    parser.add_argument("--agentic-mcp", action="store_true",
+                        help="add agentic+mcp arm (requires ANTHROPIC_API_KEY)")
+    parser.add_argument("--agentic-mcp-model", default="claude-sonnet-4-5-20250929")
+    parser.add_argument("--agentic-mcp-max-iter", type=int, default=20)
     args = parser.parse_args()
     selected = tuple(case for case in CASES if not args.case or case.name in args.case)
+    agentic_backend: AgenticBackend | None = None
+    if args.agentic:
+        key = _load_env("ANTHROPIC_API_KEY")
+        if not key:
+            print("error: --agentic requires ANTHROPIC_API_KEY", file=sys.stderr)
+            return 1
+        agentic_backend = AgenticBackend(args.agentic_model, key, args.agentic_max_iter)
+    agentic_mcp_backend: AgenticHarnessBackend | None = None
+    if args.agentic_mcp:
+        key = _load_env("ANTHROPIC_API_KEY")
+        if not key:
+            print("error: --agentic-mcp requires ANTHROPIC_API_KEY", file=sys.stderr)
+            return 1
+        agentic_mcp_backend = AgenticHarnessBackend(
+            args.agentic_mcp_model, key, args.agentic_mcp_max_iter
+        )
     result = (
         {"status": "valid", "calibration": calibrate(selected)}
         if args.calibrate_only
@@ -1083,6 +1741,8 @@ def main() -> int:
                 args.cache_read_cost_per_mtok,
                 args.cache_write_cost_per_mtok,
             ),
+            agentic_backend,
+            agentic_mcp_backend,
         )
     )
     if args.calibrate_only and not result["calibration"]["valid"]:
