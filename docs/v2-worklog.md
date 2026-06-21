@@ -1,86 +1,74 @@
 # v2 Worklog — gaps between the shipped V2 implementation and `v2_spec.md`
 
-> Found by auditing the `V2 implementation` commit (`5d22f2a`) against `docs/v2_spec.md`. None of these are covered by `docs/13-v3-roadmap.md` (that doc is all *new* features — repo-wide audit, call-site-sweep gate, Sentry). The one overlap: v3 §0 plans to (re)build `analysis/call_graph.py`, so the **Bucket B** dead-code fixes can either land here or fold into that work.
+> **STATUS (commit `ca39786`): all buckets A–E done.** Fixed in parallel (Buckets B/C/D via worktree agents, A/E by hand), integrated onto `narrow-scope-anika`, 52 tests passing, demo runs end-to-end showing find_duplicates / find_dead_code / generate_docs. Only the intentionally-deferred `[decide]/[tune]` items (F1–F4) and one newly-discovered issue (G1) remain — both for v3.
 >
-> **What's solid (not in scope here):** all 8 tools register and run; 45 tests pass; the atomic mutation path (`apply_and_verify` / `apply_and_verify_multi`) is correct — snapshots all files, parse-gates before writing, commits all-or-restores-all. The gaps below are in ranking/heuristics and the memory/context layer, not the trust spine.
+> Found by auditing the `V2 implementation` commit (`5d22f2a`) against `docs/v2_spec.md`. None of these are covered by `docs/13-v3-roadmap.md` (that doc is all *new* features — repo-wide audit, call-site-sweep gate, Sentry). The one overlap: v3 §0 plans to (re)build `analysis/call_graph.py`, so the **Bucket B** dead-code fixes landed here and can be carried into that work.
+>
+> **What was solid (never in scope here):** all 8 tools register and run; the atomic mutation path (`apply_and_verify` / `apply_and_verify_multi`) is correct — snapshots all files, parse-gates before writing, commits all-or-restores-all. The gaps below were in ranking/heuristics and the memory/context layer, not the trust spine.
 
 ## How to use this
-Items are grouped into **buckets by the files they touch**, so buckets can be worked **in parallel** without merge conflicts. Within a bucket, do items top-to-bottom. Priority: 🔴 can produce wrong results in a live test · 🟠 a spec feature that's half-wired · 🟡 cosmetic/polish · ⚪ intentionally deferred (`[decide]`/`[tune]` from the spec).
+Items are grouped into **buckets by the files they touch**. Priority: 🔴 can produce wrong results in a live test · 🟠 a spec feature that's half-wired · 🟡 cosmetic/polish · ⚪ intentionally deferred (`[decide]`/`[tune]` from the spec).
 
 ---
 
-## Bucket A — Duplicate detection polish  · files: `analysis/duplicates.py`
+## Bucket A — Duplicate detection polish  · files: `analysis/duplicates.py`  ✅ done
 
-- [ ] **A1 🟡 Rank + sort are wrong.** Plain: when it finds duplicate functions, results should be scored 0–100 by how similar they are and listed best-first; instead they're just numbered 1,2,3 in discovery order and never sorted. The duplicates themselves are correct — only the order/score looks arbitrary in a demo.
-  - Where: `duplicates.py:172,187,271` (`rank` is a running counter) and `:285-287` (concatenates structural+semantic, no sort).
-  - Fix: set `rank = round(similarity * 100)` per pair; sort the combined `pairs` list by `rank` desc before returning.
-- [ ] **A2 🟡 Cross-tier dedup is too aggressive.** Plain: the guard that stops the same pair being listed twice also drops a *real* semantic pair (A,C) when A and C each happen to appear in *different* structural pairs.
-  - Where: `duplicates.py:262-265` — checks set-membership of each endpoint, not the actual pair.
-  - Fix: track emitted structural pairs as `frozenset({a_key, b_key})` and skip a semantic pair only if that exact frozenset was already emitted.
+- [x] **A1 🟡 Rank + sort are wrong.** Plain: when it finds duplicate functions, results should be scored 0–100 by how similar they are and listed best-first; instead they're just numbered 1,2,3 in discovery order and never sorted. The duplicates themselves are correct — only the order/score looks arbitrary in a demo.
+  - Fixed: `rank = round(similarity * 100)` per pair (structural = 100); combined list sorted by `rank` desc before returning.
+- [x] **A2 🟡 Cross-tier dedup is too aggressive.** Plain: the guard that stops the same pair being listed twice also drops a *real* semantic pair (A,C) when A and C each happen to appear in *different* structural pairs.
+  - Fixed: track emitted structural pairs as `frozenset({a_key, b_key})`; skip a semantic pair only if that exact frozenset was already emitted.
 
-## Bucket B — Dead-code accuracy  · files: `analysis/call_graph.py`, `analysis/dead_code.py`
+## Bucket B — Dead-code accuracy  · files: `analysis/call_graph.py`, `analysis/dead_code.py`  ✅ done
 
-> Highest live-test risk. Heads-up for whoever's testing: treat `find_dead_code` as advisory and eyeball results before proposing `remove_dead_code`.
+> Was the highest live-test risk. Still: treat `find_dead_code` as advisory and eyeball results before proposing `remove_dead_code` (best-effort static analysis can't see everything).
 
-- [ ] **B1 🔴 Name resolver invents false call-edges → real dead code looks alive.** Plain: to decide what's dead, it traces who-calls-what. When two files both define `compute`, a bare `compute()` call is credited to whichever it finds first, so a truly-dead function can look "called." Causes false negatives (misses dead code).
-  - Where: `call_graph.py:~312` final fallback matches any node whose unqualified name equals the call name; `:~246` `call_sites()` counts across same-named symbols.
-  - Fix: only resolve unqualified names within the same module's symbol table or a real imported-name map; when genuinely ambiguous, record no edge (or a flagged "ambiguous" one) rather than guessing the first match.
-- [ ] **B2 🔴 "Not sure it's dead" warning fires far too often.** Plain: if a function's *name* shows up inside any string or comment, it lowers confidence to `low` (in case the code calls it dynamically). But it matches every word in every string, so tons of symbols get wrongly demoted.
-  - Where: `dead_code.py:~147` regex matches any identifier-like substring in any string literal.
-  - Fix: narrow to actual reflection patterns (e.g. `getattr(obj, "name")`, string keys passed to dispatch), not all strings/comments.
-- [ ] **B3 🔴 `__all__` / `__main__` parsed by crude regex → missed entry points.** Plain: these are how code says "this is a real entry point, don't call it dead." It eyeballs the text instead of parsing, so tuple `__all__ = (...)`, multi-line lists, and multi-line `__main__` calls slip past → those entry points get mis-flagged.
-  - Where: `call_graph.py:63` (`__all__` list-only regex), `:77-85` (`__main__` call regex).
-  - Fix: read both via tree-sitter (the AST is already parsed) instead of regex over source text.
-- [ ] **B4 🟡 `storage` param is accepted but unused** in `find_dead_code` (`dead_code.py:25-26`) — wire the AST-signature cache or drop the param. (Low priority; note it's also a v3 §0 concern.)
+- [x] **B1 🔴 Name resolver invents false call-edges → real dead code looks alive.** Plain: to decide what's dead, it traces who-calls-what. When two files both define `compute`, a bare `compute()` call is credited to whichever it finds first, so a truly-dead function can look "called."
+  - Fixed: unqualified names resolve only within the same module's symbol table, then a real imported-name map, then a project-wide match **only when unambiguous**; ambiguous names record no edge. `call_sites()` counts exact qualnames only. New test: a same-named symbol in another file no longer masks dead code.
+- [x] **B2 🔴 "Not sure it's dead" warning fires far too often.** Plain: if a function's *name* shows up inside any string or comment, it lowered confidence to `low`. But it matched every word in every string.
+  - Fixed: narrowed to genuine reflection sites — string args to `getattr`/`setattr`/`hasattr`/`delattr` and string keys in dispatch dicts — via AST, not blanket string scan.
+- [x] **B3 🔴 `__all__` / `__main__` parsed by crude regex → missed entry points.**
+  - Fixed: both read via tree-sitter over the already-parsed AST; handles tuple/set `__all__`, multi-line lists, and multi-line `__main__` blocks.
+- [x] **B4 🟡 `storage` param accepted but unused** in `find_dead_code`.
+  - Fixed: wired the AST-signature cache (`cache_get`/`cache_set`) keyed on a signature of the directory's files; re-run on unchanged tree skips rebuilding the graph. *(See G1 — this cache shares the absolute-path issue.)*
 
-## Bucket C — Memory & docs layer  · files: `memory/context.py`, `docs_gen.py`, `core/schema.py`
+## Bucket C — Memory & docs layer  · files: `memory/context.py`, `docs_gen.py`, `core/schema.py`, `memory/agent_memory.py`  ✅ done
 
-> This is where the "smart memory" is half-wired — it falls back to dumb heuristics instead of the AI-similarity path.
+> This is where the "smart memory" was half-wired — it fell back to dumb heuristics instead of the AI-similarity path.
 
-- [ ] **C1 🟠 Vector ("find related modules by meaning") never actually runs.** Plain: the pitch is to surface the most *related* files via AI similarity. But nothing ever feeds the per-module notes into the similarity index — only individual *functions* get indexed (by duplicate detection). So `relevant()` queries an index with no module entries, finds nothing, and silently falls back to "files whose names start the same."
-  - Where: only `duplicates.py:226` ever calls `vector_index.upsert(...)`, with function meta `{file,name,line}` and no `module` key; `context.py:32-48` reads `meta["module"]` (always empty).
-  - Fix: in `generate_docs`/agent-memory, embed each `ModuleContext` summary and `upsert` it with `meta={"module": ...}` so the vector path has data to find.
-- [ ] **C2 🟠 "Which files depend on this?" ignores the call graph.** Plain: there's a real tool that can read the code and find dependents, but the docs feature instead asks its own memory "did I previously record a dependency?" On a fresh repo it has no memory yet, so everything reports `dependents: []`.
-  - Where: `context.py:76-79` (`dependents()` reads stored `ctx.dependents`, inverted/circular); `docs_gen.py:54` consumes it. `analysis/call_graph.py` exists but is orphaned here.
-  - Fix: compute dependents from the call graph (`dependents_of`) at doc-gen time. (Note: v3 §0 will provide `dependents_of`; could share.)
-- [ ] **C3 🟠 `get_context_map` missing `last_updated_run`.** Plain: the "what do you remember about this file" response was supposed to say *when it last looked*; that field just isn't there.
-  - Where: not in `ModuleContext` (`schema.py:146-177`) nor the return (`docs_gen.py:132-137`). Spec §2.4.
-  - Fix: stamp a run id/timestamp on `ModuleContext` when persisting and include it in the return. (Timestamps in this repo come from outside the call — pass it in, don't call `Date.now()`-equivalents in pure code.)
-- [ ] **C4 🟡 Generated docs mix facts and fill-in blanks.** Plain: the plan was for the tool to write the *facts* and leave clearly-marked blanks for Claude to write the prose; instead facts and `<!-- claude: fill -->` placeholders are interleaved, so it's unclear what's real vs. to-be-filled.
-  - Where: `docs_gen.py:~76-92` template. Spec §8.
-  - Fix: separate an "extracted facts" section from a clearly-marked "needs Claude" section.
-- [ ] **C5 🟡 Magic-number flag is noise.** Plain: trying to spot magic numbers, it flags any 2+ digit number — years (`2024`), versions, etc.
-  - Where: `docs_gen.py:69`.
-  - Fix: tighten the heuristic (skip comments/strings; ignore common years/versions) or drop it.
+- [x] **C1 🟠 Vector ("find related modules by meaning") never actually ran.** Plain: nothing fed the per-module notes into the similarity index — only individual functions got indexed.
+  - Fixed: `generate_docs` now embeds each `ModuleContext` summary and upserts it with `meta={"module": ...}` (guarded on `[semantic]` availability); `relevant()` now finds module entries. Verified offline with a stub embedder.
+- [x] **C2 🟠 "Which files depend on this?" ignored the call graph.**
+  - Fixed: `dependents()` builds the call graph and finds modules that actually reference the target; `generate_docs` passes the repo root so it works on a fresh repo.
+- [x] **C3 🟠 `get_context_map` missing `last_updated_run`.**
+  - Fixed: added a deterministic `last_updated_run` (`run-1`, `run-2`, … off the prior stamp — no wall-clock in pure code) on `ModuleContext`; returned by `get_context_map`.
+- [x] **C4 🟡 Generated docs mixed facts and fill-in blanks.**
+  - Fixed: the `.md` now has a clearly-marked "Extracted (facts)" section and a separate "Needs Claude" section for prose.
+- [x] **C5 🟡 Magic-number flag was noise.**
+  - Fixed: strips comments/strings, ignores years (1900–2099) and version-like dotted numbers; flags only bare standalone integers.
 
-## Bucket D — Repo hygiene & demo  · files: `.gitignore`, `scripts/demo.py`, junk files, legacy tests
+## Bucket D — Repo hygiene & demo  · files: `.gitignore`, `scripts/demo.py`, junk files, legacy tests  ✅ done
 
-- [ ] **D1 🟡 Demo script doesn't show any V2 feature.** Plain: `scripts/demo.py` still only does the original good-edit/bad-edit refactor. There's no scripted "watch it find a duplicate and safely merge it" or "find + safely remove dead code" moment — the thing a live demo most needs.
-  - Fix: extend `scripts/demo.py` to call `find_duplicates` (on the planted `demo_repo/billing.py` duplicate) and `find_dead_code`, then drive a `consolidate_duplicate` / `remove_dead_code` through `apply_and_verify(_multi)`.
-- [ ] **D2 🟡 Worktree junk committed.** Two `.claude/worktrees/agent-…` files got committed in `5d22f2a`. Remove them and add `.claude/worktrees/` to `.gitignore`.
-- [ ] **D3 ⚪ Legacy placeholder tests.** `tests/test_extract|flatten|imports|split_file.py` are still `pytest.skip` stubs from the old `src/` layout. Delete (the real coverage is in `test_duplicates`/`test_dead_code`/etc.).
+- [x] **D1 🟡 Demo script didn't show any V2 feature.**
+  - Fixed: `scripts/demo.py` now walks ANALYZE → FIND_DUPLICATES → FIND_DEAD_CODE → GENERATE_DOCS → good-edit (commits) → bad-edit (caught + rolled back) → dashboard. Runs without the `[semantic]` extra (prints the "semantic: unavailable" note instead of requiring torch).
+- [x] **D2 🟡 Worktree junk committed.** Removed the two `.claude/worktrees/agent-…` files; added `.claude/worktrees/` to `.gitignore`.
+- [x] **D3 ⚪ Legacy placeholder tests.** Deleted the four `tests/test_extract|flatten|imports|split_file.py` stubs (suite now has 0 skips).
 
-## Bucket E — Multi-file edit log  · files: `core/apply.py`, `core/storage.py`
+## Bucket E — Multi-file edit log  · files: `core/apply.py`, `core/storage.py`  ✅ done
 
-- [ ] **E1 🟡 `retries` only counts the first file** on a multi-file edit (`apply.py:~54` + `storage.count_attempts` filters by the first path only). Informational only — doesn't affect gating. Fix: count attempts across any touched file, or document the limitation.
+- [x] **E1 🟡 `retries` only counted the first file** on a multi-file edit.
+  - Fixed: `count_attempts` now accepts a list and counts prior non-committed attempts touching **any** affected file; single-file behavior unchanged.
+
+## Bucket G — discovered during integration (for v3) ⚠️ open
+
+- [ ] **G1 🟠 Analysis/vector cache stores ABSOLUTE file paths.** Plain: the cache key is the file's *content* (good — re-seen code skips re-analysis), but the cached *result* embeds the absolute path it was first analyzed under. So a cache hit from a different working directory (or another machine, or a worktree) hands back a stale path. Symptom seen live: the demo briefly printed `…/.claude/worktrees/agent-…/demo_repo/orders.py` because Redis still held a result cached while an agent ran the demo inside its worktree. Not a correctness bug for the analysis itself, but the path field is wrong/misleading and leaks across checkouts.
+  - Where: `core/analyze.py` caches `AnalysisResult` (with absolute `file`/`location`) keyed on content sha1; same pattern in `dead_code.py`'s new cache (B4) and the vector index meta.
+  - Fix: store **repo-relative** paths in cached results (and the `meta`), resolving to absolute only at the boundary; or include the path in the cache key. Flushed Redis (`refactorika:cache`, `refactorika:vectors`) as a stopgap.
 
 ## Deferred — intentional `[decide]`/`[tune]` from the spec (⚪ low priority)
 
-These were explicitly left open in `v2_spec.md §14`; logging so they're not forgotten:
-- [ ] **F1** Near-exact structural duplicate tier (`SequenceMatcher` ≥ 0.95 over the type stream) — not implemented (spec §3.1, `[decide]`).
-- [ ] **F2** Registration-decorator entry-point list has only 3 entries (`app.route`, `click.command`, `pytest.fixture`) — expand (spec §4.2, `[tune list]`).
+Explicitly left open in `v2_spec.md §14`:
+- [ ] **F1** Near-exact structural duplicate tier (`SequenceMatcher` ≥ 0.95 over the type stream) — spec §3.1 `[decide]`.
+- [ ] **F2** Registration-decorator entry-point list has only 3 entries (`app.route`, `click.command`, `pytest.fixture`) — expand (spec §4.2 `[tune list]`).
 - [ ] **F3** Method-level reachability (methods currently collapse under their class) — spec §4.1 allowed this for v1.
 - [ ] **F4** Tune thresholds (`0.83` semantic cutoff, confidence ranks) against the curated repo (spec §14.7).
-
----
-
-## Suggested parallelization
-
-Buckets **A, B, C, D, E touch disjoint files** → safe to run concurrently. Recommended split if fanning out:
-- **Agent 1:** Bucket B (dead-code accuracy — biggest correctness win).
-- **Agent 2:** Bucket C (memory/docs wiring).
-- **Agent 3:** Buckets A + E (small, duplicates + edit-log).
-- **Agent 4:** Bucket D (demo + hygiene — most demo value).
-
-`schema.py` is touched only by C3 — keep it inside Bucket C to avoid a shared-file conflict.
 </content>
