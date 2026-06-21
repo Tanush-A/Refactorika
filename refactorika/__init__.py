@@ -1,5 +1,3 @@
-"""Refactorika verification harness."""
+"""Refactorika — verified structural refactoring for Python, exposed to Claude over MCP."""
 
-from .harness import GateChecks, VerificationRecord, verify_edits
-
-__all__ = ["GateChecks", "VerificationRecord", "verify_edits"]
+__version__ = "0.1.0"

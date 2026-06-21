@@ -1,5 +1,8 @@
 """Calibrated OFF-vs-ON benchmark for the Refactorika verification harness."""
 
+# Imports below the repository-path bootstrap are intentional for direct script use.
+# ruff: noqa: E402,I001
+
 from __future__ import annotations
 
 import argparse
