@@ -27,7 +27,6 @@ from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from refactorika.core.schema import DuplicatePair, SymbolRef
 from refactorika.analysis.parser import (
     canonical_type_stream,
     function_text,
@@ -35,6 +34,8 @@ from refactorika.analysis.parser import (
     iter_functions,
     iter_imports,
 )
+from refactorika.core.schema import DuplicatePair, SymbolRef
+from refactorika.memory.vector_index import _cosine
 
 if TYPE_CHECKING:
     from refactorika.core.storage import Storage
@@ -43,16 +44,21 @@ if TYPE_CHECKING:
 _SKIP_DIRS = {".venv", "__pycache__", "tests"}
 
 
+def _is_test_file(p: Path) -> bool:
+    """Test files are noise for duplicate detection — they look alike but aren't dupes."""
+    n = p.name
+    return n.startswith("test_") or n.endswith("_test.py") or n == "conftest.py"
+
+
 def _collect_py_files(path: str) -> list[Path]:
-    """Return all .py files under path, skipping unwanted directories."""
+    """Return all .py files under path, skipping caches, tests dirs, and test files."""
     p = Path(path)
     if p.is_file():
-        return [p] if p.suffix == ".py" else []
+        return [p] if p.suffix == ".py" and not _is_test_file(p) else []
 
     result: list[Path] = []
     for child in p.rglob("*.py"):
-        # Skip if any path component is in _SKIP_DIRS
-        if any(part in _SKIP_DIRS for part in child.parts):
+        if any(part in _SKIP_DIRS for part in child.parts) or _is_test_file(child):
             continue
         result.append(child)
     return result
@@ -111,7 +117,7 @@ def find_duplicates(
     path: str,
     storage: "Storage",
     vector_index: "VectorIndex",
-    threshold: float = 0.83,
+    threshold: float = 0.55,
 ) -> dict:
     """Detect duplicate functions in path (file or directory).
 
@@ -153,6 +159,8 @@ def find_duplicates(
     # Tier 1: Structural fingerprint (SHA1 of canonical type stream)
     # ------------------------------------------------------------------
     fingerprint_map: dict[str, list[tuple[str, str, int]]] = defaultdict(list)
+    # Structural fingerprint per "file:name" key, threaded into tier-2 vector meta.
+    fingerprint_by_key: dict[str, str] = {}
 
     for file_str, name, line, node, source in all_funcs:
         cached = storage.cache_get(f"fp:{file_str}:{name}")
@@ -163,13 +171,13 @@ def find_duplicates(
             sha1 = _sha1_hex(" ".join(type_stream))
             storage.cache_set(f"fp:{file_str}:{name}", {"sha1": sha1})
 
+        fingerprint_by_key[f"{file_str}:{name}"] = sha1
         if sha1:
             fingerprint_map[sha1].append((file_str, name, line))
 
     structural_pairs: list[DuplicatePair] = []
-    # Track which (file, name) combos are already in structural pairs
-    structural_covered: set[tuple[str, str]] = set()
-    rank = 0
+    # Track exact structural pairs already emitted, to dedupe against tier 2.
+    structural_pair_keys: set[frozenset] = set()
 
     for sha1, members in fingerprint_map.items():
         if len(members) < 2:
@@ -184,7 +192,6 @@ def find_duplicates(
                 ref_b = SymbolRef(file=fb, name=nb, line=lb)
 
                 target, reason = _pick_consolidation_target(ref_a, ref_b, sources)
-                rank += 1
 
                 structural_pairs.append(
                     DuplicatePair(
@@ -194,15 +201,15 @@ def find_duplicates(
                         match_type="structural",
                         consolidation_target=target,
                         reason=reason,
-                        rank=rank,
+                        rank=100,  # round(1.0 * 100)
                     )
                 )
-                structural_covered.add((fa, na))
-                structural_covered.add((fb, nb))
+                structural_pair_keys.add(frozenset({f"{fa}:{na}", f"{fb}:{nb}"}))
 
     # ------------------------------------------------------------------
     # Tier 2: Semantic similarity via embeddings
     # ------------------------------------------------------------------
+    structural_pairs.sort(key=lambda p: p.rank, reverse=True)
     result: dict = {
         "path": path,
         "pairs": [p.to_dict() for p in structural_pairs],
@@ -215,31 +222,66 @@ def find_duplicates(
         )
         return result
 
-    # Embed each function and upsert to vector index
+    # Embed each function ONCE (batched: one API round-trip), then upsert.
+    # embedded[key] = {"vec", "text", "file", "name", "line"}
+    embedded: dict[str, dict] = {}
+    embed_texts: list[str] = []
+    embed_keys: list[str] = []
+    embed_meta: list[tuple[str, str, int]] = []
+
     for file_str, name, line, node, source in all_funcs:
         try:
             text = function_text(node, source)  # type: ignore[arg-type]
-            vec = embeddings.embed_one(text)
         except Exception:
             continue
         key = f"{file_str}:{name}"
-        vector_index.upsert(key, vec, meta={"file": file_str, "name": name, "line": line})
+        embed_texts.append(text)
+        embed_keys.append(key)
+        embed_meta.append((file_str, name, line))
 
-    # Query for near-duplicate pairs (semantic)
+    try:
+        vecs = embeddings.embed(embed_texts)
+    except Exception:
+        vecs = []
+
+    for key, text, (file_str, name, line), vec in zip(
+        embed_keys, embed_texts, embed_meta, vecs
+    ):
+        if vec is None:
+            continue
+        embedded[key] = {
+            "vec": vec,
+            "text": text,
+            "file": file_str,
+            "name": name,
+            "line": line,
+        }
+        vector_index.upsert(
+            key,
+            vec,
+            meta={
+                "file": file_str,
+                "name": name,
+                "line": line,
+                "fingerprint": fingerprint_by_key.get(key, ""),
+            },
+            text=text,
+        )
+
+    # Query for near-duplicate pairs (semantic) via hybrid search.
     semantic_pairs: list[DuplicatePair] = []
     # Track dedupe: frozenset of two keys already emitted as a semantic pair
     seen_semantic: set[frozenset] = set()
 
-    for file_str, name, line, node, source in all_funcs:
-        try:
-            text = function_text(node, source)  # type: ignore[arg-type]
-            vec = embeddings.embed_one(text)
-        except Exception:
-            continue
+    for query_key, entry in embedded.items():
+        vec = entry["vec"]
+        text = entry["text"]
+        file_str = entry["file"]
+        name = entry["name"]
+        line = entry["line"]
 
-        query_key = f"{file_str}:{name}"
         try:
-            neighbors = vector_index.query(vec, k=5, threshold=threshold)
+            neighbors = vector_index.query_hybrid(vec, text, k=5)
         except Exception:
             continue
 
@@ -250,6 +292,19 @@ def find_duplicates(
             pair_key: frozenset = frozenset([query_key, neighbor.key])
             if pair_key in seen_semantic:
                 continue
+
+            # Skip only if this exact pair was already emitted in tier 1.
+            if frozenset({query_key, neighbor.key}) in structural_pair_keys:
+                continue
+
+            # Recompute TRUE cosine — RRF/hybrid scores are not in [0,1].
+            neighbor_entry = embedded.get(neighbor.key)
+            if neighbor_entry is None:
+                continue
+            cosine = _cosine(vec, neighbor_entry["vec"])
+            if cosine < threshold:
+                continue
+
             seen_semantic.add(pair_key)
 
             # Parse neighbor key
@@ -258,31 +313,25 @@ def find_duplicates(
             n_name = n_meta.get("name", "")
             n_line = n_meta.get("line", 0)
 
-            # Skip if already covered by tier-1 structural pairs
-            if (file_str, name) in structural_covered and (
-                n_file, n_name
-            ) in structural_covered:
-                continue
-
             ref_a = SymbolRef(file=file_str, name=name, line=line)
             ref_b = SymbolRef(file=n_file, name=n_name, line=n_line)
 
             target, reason = _pick_consolidation_target(ref_a, ref_b, sources)
-            rank += 1
+            similarity = round(cosine, 4)
 
             semantic_pairs.append(
                 DuplicatePair(
                     a=ref_a,
                     b=ref_b,
-                    similarity=round(neighbor.score, 4),
+                    similarity=similarity,
                     match_type="semantic",
                     consolidation_target=target,
                     reason=reason,
-                    rank=rank,
+                    rank=round(cosine * 100),
                 )
             )
 
-    result["pairs"] = [p.to_dict() for p in structural_pairs] + [
-        p.to_dict() for p in semantic_pairs
-    ]
+    all_pairs = structural_pairs + semantic_pairs
+    all_pairs.sort(key=lambda p: p.rank, reverse=True)
+    result["pairs"] = [p.to_dict() for p in all_pairs]
     return result

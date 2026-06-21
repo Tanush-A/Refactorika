@@ -16,14 +16,16 @@ dependencies = [
     "autoflake>=2.3.0",
     "radon>=6.0.0",
     "typer>=0.12.0",
-    "redis>=5.0.0",
+    "redis>=7.1",
     "numpy>=1.24",
+    "sentry-sdk>=2.0",
 ]
 
 [project.optional-dependencies]
 semantic = [
-    "sentence-transformers>=2.0",
     "openai>=1.0",
+    "redisvl>=0.13",
+    "sentence-transformers>=2.0",
 ]
 dev = [
     "pytest>=8.0.0",
@@ -34,6 +36,7 @@ dev = [
 
 [project.scripts]
 refactorika = "refactorika.cli:main"
+refactorika-scan = "refactorika.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["refactorika"]

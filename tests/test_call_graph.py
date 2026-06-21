@@ -4,7 +4,6 @@ from pathlib import Path
 
 from refactorika.analysis.call_graph import CallGraph
 
-
 SIMPLE = """\
 def foo():
     return 1
@@ -86,8 +85,70 @@ def test_main_block_makes_entry_point(tmp_path: Path) -> None:
     assert "mod.run" in eps
 
 
+def test_dependents_of(tmp_path: Path) -> None:
+    # b.py and c.py both import + call a.shared; a has 2 dependents, b/c have 0.
+    (tmp_path / "a.py").write_text("def shared():\n    return 1\n")
+    (tmp_path / "b.py").write_text("from a import shared\n\ndef bb():\n    return shared()\n")
+    (tmp_path / "c.py").write_text("from a import shared\n\ndef cc():\n    return shared()\n")
+    cg = CallGraph.build(str(tmp_path))
+    assert cg.dependents_of("a") == ["b", "c"]
+    assert cg.dependent_count("a") == 2
+    assert cg.dependents_of("b") == []  # leaf, nothing depends on it
+    assert cg.dependent_count("c") == 0
+
+
 def test_call_sites_count(tmp_path: Path) -> None:
     (tmp_path / "mod.py").write_text(SIMPLE)
     cg = CallGraph.build(str(tmp_path))
     # foo is called once (by bar)
     assert cg.call_sites("mod.foo") >= 1
+
+
+# B3: __all__ as a tuple / multi-line list must be parsed (AST, not regex).
+TUPLE_ALL = """\
+__all__ = (
+    "_kept_one",
+    "_kept_two",
+)
+
+def _kept_one():
+    return 1
+
+def _kept_two():
+    return 2
+
+def _not_exported():
+    return 3
+"""
+
+
+def test_all_tuple_and_multiline_anchors_entry_points(tmp_path: Path) -> None:
+    (tmp_path / "mod.py").write_text(TUPLE_ALL)
+    cg = CallGraph.build(str(tmp_path))
+    eps = cg.entry_points()
+    assert "mod._kept_one" in eps
+    assert "mod._kept_two" in eps
+    assert "mod._not_exported" not in eps
+
+
+# B3: a multi-line __main__ block's calls must all anchor as entry points.
+MULTILINE_MAIN = """\
+def _setup():
+    return 1
+
+def _go():
+    return 2
+
+if __name__ == "__main__":
+    _setup()
+    result = _go()
+    print(result)
+"""
+
+
+def test_multiline_main_block_calls_are_entry_points(tmp_path: Path) -> None:
+    (tmp_path / "mod.py").write_text(MULTILINE_MAIN)
+    cg = CallGraph.build(str(tmp_path))
+    eps = cg.entry_points()
+    assert "mod._setup" in eps
+    assert "mod._go" in eps

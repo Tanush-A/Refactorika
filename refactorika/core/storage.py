@@ -15,6 +15,7 @@ from typing import Optional
 
 _LOG_KEY = "refactorika:log"
 _CACHE_KEY = "refactorika:cache"
+_PLAN_KEY = "refactorika:plan"
 
 
 def _truthy(value: Optional[str]) -> bool:
@@ -100,10 +101,14 @@ class Storage:
             return [json.loads(r) for r in self._redis.lrange(_LOG_KEY, 0, -1)]
         return self._read_json()["log"]
 
-    def count_attempts(self, file: str) -> int:
-        """Prior non-committed attempts for a file -> the retry index of the next edit."""
+    def count_attempts(self, file: str | list[str]) -> int:
+        """Prior non-committed attempts touching any of these file(s)."""
+        targets = {file} if isinstance(file, str) else set(file)
         return sum(
-            1 for r in self.get_log() if r["file"] == file and r["status"] != "committed"
+            1
+            for r in self.get_log()
+            if r["status"] != "committed"
+            and (targets & set(r.get("files") or [r["file"]]))
         )
 
     # --- analysis cache (keyed on normalized AST signature) --------------------
@@ -120,6 +125,21 @@ class Storage:
         data = self._read_json()
         data["cache"][key] = value
         self._write_json(data)
+
+    # --- current refactor plan (single plan, overwritten) ----------------------
+    def save_plan(self, plan: dict) -> None:
+        if self._redis:
+            self._redis.set(_PLAN_KEY, json.dumps(plan))
+            return
+        data = self._read_json()
+        data["plan"] = plan
+        self._write_json(data)
+
+    def load_plan(self) -> dict | None:
+        if self._redis:
+            raw = self._redis.get(_PLAN_KEY)
+            return json.loads(raw) if raw else None
+        return self._read_json().get("plan")
 
     # --- vector index fallback (brute-force when RediSearch unavailable) -------
     def vector_upsert(self, key: str, entry: dict) -> None:
