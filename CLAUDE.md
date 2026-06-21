@@ -12,7 +12,7 @@
 - **Target user:** a dev with a small/medium/legacy/AI-slop Python project who wants mechanical cleanup done *safely* — not by hand, not by trusting an agent blind.
 
 ## Two tool classes (everything is one or the other)
-- **Advisory (read-only — finds + explains):** `analyze_file` · `find_duplicates` · `find_dead_code` · `generate_docs` · `get_context_map` · `get_log`. Surface ranked opportunities + memory; feed Claude's next proposal.
+- **Advisory (read-only — finds + explains):** `analyze_file` · `find_duplicates` · `find_related` · `find_dead_code` · `generate_docs` · `get_context_map` · `audit_repo`/`get_plan`/`confirm_plan` (v3) · `get_log`. Surface ranked opportunities + memory; feed Claude's next proposal. `find_related` = impact check: hybrid-search the repo for semantically-similar code (+ call-graph dependents) before changing a file, so you don't fix one copy and miss the others.
 - **Verified mutation (gated — single atomic entrypoint):** `apply_and_verify(path, new_content, refactor_kind)`. Every structural edit goes through it — `refactor_kind` includes `consolidate_duplicate` / `remove_dead_code`, so "find dead code" becomes "**safely remove** it, proven by your tests."
 
 ## The core flow (golden path — must always work)
@@ -52,7 +52,7 @@ Target: **small-to-medium Python codebases** — single-package or small multi-f
 - **Lint/format gate:** `ruff` — normalize formatting, reject only *new* violations vs. pre-edit baseline.
 - **Behavior gate:** `pytest` — type-clean ≠ behavior-preserving; catches silent regressions; *proves* dead-code/dup removals are safe.
 - **Duplicate/dead-code analysis:** structural AST fingerprint (precise clones) **+** hybrid search — embeddings (`text-embedding-3-small` via OpenAI primary; `sentence-transformers` keyless fallback) fused with BM25 via Redis `FT.HYBRID`. Call-graph reachability for dead code.
-- **Memory/state — Redis Iris via RedisVL (primary, JSON fallback):** four components — LangCache/AST-keyed cache · **Hybrid Search Index** (per-fn vector + BM25 + tags, `FT.HYBRID` RRF-fused — strictly better than pure cosine on code) · Agent Memory (cross-session context + refactor history) · Context Retriever (tag/num filters + hybrid retrieval). Hybrid needs Redis 8.4+ Query Engine (Redis Cloud/Stack); **degrades to local `.refactorika/` files / brute-force** offline. Full detail: `docs/05-redis-iris.md`.
+- **Memory/state — Redis Iris via RedisVL (primary, JSON fallback):** four components — LangCache/AST-keyed cache · **Hybrid Search Index** (per-fn vector + BM25 + tags, `FT.HYBRID` RRF-fused — strictly better than pure cosine on code) · Agent Memory (cross-session context + refactor history) · Context Retriever (tag/num filters + hybrid retrieval). Hybrid needs Redis 8.4+ Query Engine — **as run: local Docker `redis:8` (8.8) on `:6380`, `--restart=always`** (Cloud/Stack also work); **degrades to brute-force vector / `.refactorika/` files** otherwise. Full detail: `docs/05-redis-iris.md`.
 
 ## Architecture — one core, thin shells
 - **Interface-agnostic core library** (`refactorika/core/` + `analysis/` + `memory/`) holds all logic: analysis, gate stack, transforms, Iris memory. Reads/writes state itself so every shell sees the same thing. Canonical package is top-level **`refactorika/`** — the old `src/refactorika/` skeleton is abandoned, do not add to it.

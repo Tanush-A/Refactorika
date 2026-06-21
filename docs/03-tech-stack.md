@@ -32,7 +32,7 @@ Every mutation passes these in cheapest-first order, short-circuiting on the fir
 **Redis is the primary backend (accessed via RedisVL), with a mandatory local-file fallback so the demo always runs offline.** Redis Iris is used as four components — full detail in [05-redis-iris.md](05-redis-iris.md):
 
 - **LangCache / AST-keyed cache** — memoizes analysis + classification keyed on a *normalized AST signature* (exact key, not fuzzy match — so a re-seen file skips re-parsing without risking a false cache hit corrupting accuracy).
-- **Hybrid Search Index** — per-function docs (vector embedding + BM25 text + tag filters), queried with `FT.HYBRID` (vector ⊕ BM25, RRF-fused) for `find_duplicates` and context retrieval. Needs Redis 8.4+ with the Query Engine (Redis Cloud / Redis Stack); falls back to brute-force vector scan otherwise.
+- **Hybrid Search Index** — per-function docs (vector embedding + BM25 text + tag filters), queried with `FT.HYBRID` (vector ⊕ BM25, RRF-fused) for `find_duplicates`, `find_related`, and context retrieval. Needs Redis 8.4+ with the Query Engine — **as run: local Docker `redis:8`** (8.8) on `:6380`, `--restart=always`; Redis Cloud / Stack work too. Falls back to brute-force vector scan otherwise.
 - **Agent Memory (long-term tier)** — persists module context, architectural decisions, and refactor history *across sessions* so knowledge compounds instead of being re-derived each run.
 - **Context Retriever** — structured `Tag`/`Num` filters **+** hybrid retrieval ("the 3 most relevant prior context entries for this module" by names *and* meaning) that feed Claude's next proposal without loading the whole repo.
 

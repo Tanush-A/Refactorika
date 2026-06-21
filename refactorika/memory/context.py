@@ -32,11 +32,14 @@ class ContextRetriever:
         vi = self._get_vector_index()
         if vi is not None:
             try:
-                from refactorika.analysis.embeddings import available, embed_one  # noqa: PLC0415
+                from refactorika.analysis.embeddings import (  # noqa: PLC0415
+                    available,
+                    embed_one,
+                )
                 if available():
                     summary = f"{ctx.purpose_hint} {' '.join(e.name for e in ctx.exports)}"
                     vec = embed_one(summary)
-                    neighbors = vi.query(vec, k=k + 1, threshold=0.0)
+                    neighbors = vi.query_hybrid(vec, summary, k=k + 1)
                     results = []
                     for n in neighbors:
                         meta = n.meta
@@ -62,8 +65,12 @@ class ContextRetriever:
     def conventions(self, path: str) -> dict:
         """Return observed import/naming conventions for a module (best-effort)."""
         try:
-            from refactorika.analysis.parser import get_tree, iter_imports  # noqa: PLC0415
             from pathlib import Path  # noqa: PLC0415
+
+            from refactorika.analysis.parser import (  # noqa: PLC0415
+                get_tree,
+                iter_imports,
+            )
             source = Path(path).read_text()
             tree = get_tree(source)
             imports = list(iter_imports(tree))

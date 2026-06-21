@@ -66,7 +66,8 @@ Everything the harness exposes is either **advisory** (read-only — finds and e
 | Tool | Description | Status |
 |---|---|---|
 | `analyze_file(path)` | Ranked structural smells: file size, import order/dupes, function length, nesting depth | exists |
-| `find_duplicates(path)` | Structural fingerprint + semantic vector search; ranked pairs of duplicate functions with a consolidation target | to build |
+| `find_duplicates(path)` | Structural fingerprint + semantic hybrid search; ranked pairs of duplicate functions with a consolidation target | exists |
+| `find_related(path, symbol, k)` | Impact check: repo functions semantically similar to `path` (hybrid search) **+** modules that depend on it (call graph) — before changing it | exists |
 | `find_dead_code(path)` | Call-graph reachability; unreachable symbols with a confidence score | to build |
 | `generate_docs(path)` | Generate/update `.refactorika/context/<module>.md` (purpose, exports, dependents, decisions) | to build |
 | `get_context_map(path)` | Module context summary pulled from Redis agent memory | to build |
