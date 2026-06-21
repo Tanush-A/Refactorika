@@ -172,6 +172,66 @@ def test_consistency_beat_fires_on_the_real_demo_functions(tmp_path):
     assert memory.get_decision(shape).choice["helper_names"] == helper_names
 
 
+def test_decompose_prompt_includes_neighbor_context():
+    """Phase 4: when neighbor context is supplied, it lands in the prompt."""
+    from refactorika.pipeline.planner_llm import _decompose_prompt
+
+    block = "\n\nSemantically similar functions in this codebase:\n- pkg.other (similar)"
+    prompt = _decompose_prompt("def f(): pass", None, block)
+    assert "Semantically similar functions" in prompt
+    assert "pkg.other" in prompt
+
+
+def test_neighbor_context_surfaces_domain_peer(tmp_path):
+    """Phase 4: _neighbor_context names a semantically similar sibling (and any prior split)."""
+    from refactorika.core.schema import RefactorDecision
+    from refactorika.llm.providers import EmbeddingProvider
+    from refactorika.memory.codebase_index import build_codebase_index, codebase_vector_index
+    from refactorika.memory.decision_memory import DecisionMemory
+    from refactorika.memory.vector_index import VectorIndex
+    from refactorika.pipeline.planner_llm import _neighbor_context, _shape_pattern
+
+    class _Fake(EmbeddingProvider):
+        name = "fake"
+
+        def __init__(self):
+            super().__init__("fake")
+
+        def available(self):
+            return True
+
+        def embed(self, texts):
+            return [[1.0, 0.0] if "discount" in t.lower() else [0.0, 1.0] for t in texts]
+
+    src = (
+        "def apply_discount(p, pct):\n"
+        "    return p - p * pct\n\n\n"
+        "def compute_discount(t, r):\n"
+        "    return t * r\n\n\n"
+        "def render(x):\n"
+        "    return str(x)\n"
+    )
+    (tmp_path / "shop.py").write_text(src)
+    g = build_graph(str(tmp_path))
+    storage = Storage(redis_url=None, json_path=tmp_path / "s.json")
+    fake = _Fake()
+    cb = codebase_vector_index(storage, fake)
+    build_codebase_index(g, str(tmp_path), cb, embed_provider=fake)
+
+    dm = DecisionMemory(storage, embed_provider=fake, vector_index=VectorIndex(storage))
+    # Record how the peer was previously split, so the context can echo its helper names.
+    peer = next(q for q in g.symbols if q.endswith("compute_discount"))
+    peer_src = (tmp_path / "shop.py").read_text().split("\n\n\n")[1]
+    dm.agent.put_decision(RefactorDecision(
+        pattern=_shape_pattern(peer_src), transform_kind="decompose_function",
+        target=peer, choice={"helper_names": ["_rate_term"]}))
+
+    target = next(q for q in g.symbols if q.endswith("apply_discount"))
+    ctx = _neighbor_context(target, g, cb, dm)
+    assert "compute_discount" in ctx
+    assert "render" not in ctx  # orthogonal peer excluded
+
+
 def test_decision_memory_makes_naming_consistent(tmp_path):
     # Two identical-shape functions in different modules.
     (tmp_path / "a.py").write_text(_GOD)

@@ -65,6 +65,7 @@ Reports three honest numbers. Base: 54.5% in-scope pass (6/11), 90.9% subtask co
 .venv/bin/refactorika demo_repo                 # dry-run: plan + verified edits + metrics
 .venv/bin/refactorika demo_repo --show-graph    # symbol graph / entry points / dead code
 .venv/bin/refactorika demo_repo --show-plan     # leaf-to-root worklist
+.venv/bin/refactorika demo_repo --show-similar orders.compute_total  # semantic neighbors (needs embeddings)
 .venv/bin/refactorika demo_repo --apply         # write in place + commit
 .venv/bin/refactorika demo_repo --llm           # + LLM decomposition (needs ANTHROPIC_API_KEY)
 .venv/bin/python -m pytest -q                   # offline; no Redis, no API key needed
@@ -79,8 +80,12 @@ Reports three honest numbers. Base: 54.5% in-scope pass (6/11), 90.9% subtask co
 - ruff line-length 100; `demo_repo`/`eval/external` excluded from our lint (fixtures/3rd-party).
 
 ## Status / parked
-- Built + tested (68 passing offline): graph, transforms, checker, orchestrator, both planners,
-  CLI, MCP, decision memory.
+- Built + tested (93 passing offline): graph, transforms, checker, orchestrator, both planners,
+  CLI, MCP, decision memory, semantic codebase index (`memory/codebase_index.py`: embeds every
+  symbol into a namespaced Redis vector space; feeds the LLM decompose prompt real neighbor
+  context; `--show-similar`). God-function detection is a complexity/length/nesting union, not a
+  line count. Embeddings are provider-agnostic (local MiniLM | Ollama | OpenAI) via `llm/providers.py`,
+  the single source of truth (`analysis/embeddings.py` is now a shim).
 - Deferred: characterization tests; incremental graph (today rebuilt per item); deterministic
   cross-file `consolidate`; move/change-signature as first-class engines; multi-language.
 - Out of scope: behavior/API changes, test generation, dependency edits, architectural rewrites.
