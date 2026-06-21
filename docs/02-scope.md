@@ -30,7 +30,6 @@ The following are committed v2 capabilities, built on Redis Iris for agent memor
 
 **Context & Documentation Generation**
 - AI-generated, self-updating module documentation — Refactorika reads the codebase and emits `.refactorika/context/<module>.md` files capturing purpose, key exports, and architectural decisions.
-- Cross-session Redis agent memory: codebase knowledge persists across runs so context accumulates rather than being re-derived each time.
 
 **Duplicate & Dead Code Detection**
 - Semantic duplicate detection via vector search: embed each function's normalized AST signature, store in a Redis vector index, query by cosine similarity to surface functions with the same logic under different names.
