@@ -179,13 +179,13 @@ def test_provider_configuration_failure_invalidates_run_without_retrying() -> No
 
 
 class ScriptedHarnessBackend:
-    """Test double: returns a known-good edit via the agentic+mcp interface."""
+    """Test double: returns a known-good edit via the agentic+harness interface."""
 
-    name = "scripted+mcp"
+    name = "scripted+harness"
 
     def run(
         self, repo: Path, user_prompt: str
-    ) -> tuple[dict[str, str], Usage, float, "str | None", int]:
+    ) -> tuple[dict[str, str], Usage, float, "str | None", int, list[dict]]:
         content = (
             "from collections.abc import Iterable\n\n\n"
             "def billable_event_ids(events: Iterable[dict[str, object]]) -> list[str]:\n"
@@ -202,7 +202,7 @@ class ScriptedHarnessBackend:
             "    return selected\n"
         )
         edits = {"app/events.py": content}
-        return edits, Usage(), 0.0, None, 1
+        return edits, Usage(), 0.0, None, 1, []
 
 
 def test_agentic_mcp_arm_appears_in_records() -> None:
@@ -216,12 +216,14 @@ def test_agentic_mcp_arm_appears_in_records() -> None:
         agentic_mcp_backend=mcp_backend,
     )
     arms = {r["arm"] for r in result["records"]}
-    assert "agentic+mcp" in arms
-    assert "paired_agentic_mcp_vs_off" in result["aggregate"]
-    assert "paired_agentic_mcp_vs_agentic" in result["aggregate"]
-    mcp_record = next(r for r in result["records"] if r["arm"] == "agentic+mcp")
+    assert "agentic+harness" in arms
+    assert "paired_agentic_harness_vs_off" in result["aggregate"]
+    assert "paired_agentic_harness_vs_agentic" in result["aggregate"]
+    mcp_record = next(r for r in result["records"] if r["arm"] == "agentic+harness")
     assert mcp_record["status"] == "shipped"
     assert "tokens" in mcp_record
     assert "timing" in mcp_record
     assert "end_to_end_seconds" in mcp_record["timing"]
     assert "change" in mcp_record
+    assert "gate_log" in mcp_record
+    assert "gate_calls" in mcp_record

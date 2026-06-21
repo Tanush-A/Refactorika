@@ -337,18 +337,19 @@ def propose_agentic(backend: "AgenticBackend", case: CaseAdapter, repo: Path) ->
 
 def propose_agentic_mcp(
     backend: "AgenticHarnessBackend", case: CaseAdapter, repo: Path
-) -> Proposal:
-    edits, usage, seconds, error, model_calls = backend.run(repo, case.user_prompt)
+) -> tuple[Proposal, list[dict]]:
+    edits, usage, seconds, error, model_calls, gate_log = backend.run(repo, case.user_prompt)
     if not error and not edits:
         error = "agent made no changes to source files"
-    return Proposal(
+    proposal = Proposal(
         edits=edits if not error else {},
         usage=usage,
         seconds=seconds,
-        prompt=f"[agentic+mcp:{backend.name}] {case.user_prompt}",
+        prompt=f"[agentic+harness:{backend.name}] {case.user_prompt}",
         error=error,
         model_calls=model_calls,
     )
+    return proposal, gate_log
 
 
 def _write_patch(repo: Path, edits: dict[str, str]) -> str | None:
@@ -813,7 +814,7 @@ def _run_pair(
         if agentic_mcp_backend is not None:
             agentic_mcp_repo = materialize(case, Path(tmp) / "agentic_mcp")
             agentic_mcp_started = time.perf_counter()
-            agentic_mcp = propose_agentic_mcp(agentic_mcp_backend, case, agentic_mcp_repo)
+            agentic_mcp, agentic_mcp_gate_log = propose_agentic_mcp(agentic_mcp_backend, case, agentic_mcp_repo)
             agentic_mcp_end_to_end = time.perf_counter() - agentic_mcp_started
             agentic_mcp_landed = not bool(agentic_mcp.error)
             agentic_mcp_behavior, agentic_mcp_detail, agentic_mcp_structure = (
@@ -826,7 +827,7 @@ def _run_pair(
             )
             records.append({
                 **common,
-                "arm": "agentic+mcp",
+                "arm": "agentic+harness",
                 "status": "shipped" if agentic_mcp_landed else "error",
                 **agentic_mcp_outcome,
                 "oracle_pass": agentic_mcp_behavior if agentic_mcp_landed else None,
@@ -839,12 +840,16 @@ def _run_pair(
                 "timing": {
                     "audit_seconds": 0.0,
                     "model_seconds": round(agentic_mcp.seconds, 3),
-                    "gate_seconds": 0.0,
+                    "gate_seconds": 0.0,   # gate time is embedded in model loop, not separately measurable
                     "application_seconds": 0.0,
                     "grading_seconds": 0.0,
                     "workflow_seconds": round(agentic_mcp.seconds, 3),
                     "end_to_end_seconds": round(agentic_mcp_end_to_end, 3),
                 },
+                "gate_log": agentic_mcp_gate_log,
+                "gate_calls": len(agentic_mcp_gate_log),
+                "gate_commits": sum(1 for g in agentic_mcp_gate_log if g["status"] == "committed"),
+                "gate_rollbacks": sum(1 for g in agentic_mcp_gate_log if g["status"] == "rolled-back"),
                 "change": _change_metrics(case, agentic_mcp.edits, agentic_mcp_structure),
                 "plan": None,
                 "patch": agentic_mcp.edits,
@@ -1029,12 +1034,12 @@ def aggregate(records: list[dict]) -> dict[str, object]:
         result["paired_agentic_vs_off"] = _paired_summary(
             records, "correct_landed", arm_a="agentic", arm_b="off"
         )
-    if "agentic+mcp" in arms_present:
-        result["paired_agentic_mcp_vs_off"] = _paired_summary(
-            records, "correct_landed", arm_a="agentic+mcp", arm_b="off"
+    if "agentic+harness" in arms_present:
+        result["paired_agentic_harness_vs_off"] = _paired_summary(
+            records, "correct_landed", arm_a="agentic+harness", arm_b="off"
         )
-        result["paired_agentic_mcp_vs_agentic"] = _paired_summary(
-            records, "correct_landed", arm_a="agentic+mcp", arm_b="agentic"
+        result["paired_agentic_harness_vs_agentic"] = _paired_summary(
+            records, "correct_landed", arm_a="agentic+harness", arm_b="agentic"
         )
     return result
 
@@ -1324,6 +1329,30 @@ _AGENTIC_MCP_TOOLS: list[dict] = [
         },
     },
     {
+        "name": "apply_and_verify_multi",
+        "description": (
+            "Submit a multi-file mutation for atomic verification. Snapshots all files, runs "
+            "parse → ruff → pyright → pytest across all of them, commits all on success, or "
+            "restores all originals on failure. Required for renames, moves, and duplicate "
+            "consolidation that touch ≥2 files at once."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "edits": {
+                    "type": "object",
+                    "description": "Map of {relative_path: complete_new_content} for every file to touch",
+                    "additionalProperties": {"type": "string"},
+                },
+                "refactor_kind": {
+                    "type": "string",
+                    "description": "Kind of refactor: e.g. rename, move_symbol, consolidate_duplicate",
+                },
+            },
+            "required": ["edits", "refactor_kind"],
+        },
+    },
+    {
         "name": "run_bash",
         "description": "Run a read-only shell command (e.g. grep, cat). Output capped at 2 000 chars.",
         "input_schema": {
@@ -1340,11 +1369,13 @@ _AGENTIC_MCP_SYSTEM = (
     "You are an autonomous Python refactoring agent with access to Refactorika's analysis tools. "
     "Workflow: (1) list_files; (2) analyze_file on each source file to find the highest-value "
     "opportunity — do NOT also call find_duplicates or find_dead_code unless analyze_file "
-    "explicitly surfaces a duplicate or dead-code issue; (3) read the file; (4) submit the "
-    "refactored content immediately via apply_and_verify — it runs parse, lint, type-check, and "
-    "tests internally and rolls back with diagnostics on failure; (5) repair from the diagnostics "
-    "and retry. "
-    "You MUST use apply_and_verify for all mutations — you cannot write files directly. "
+    "explicitly surfaces a duplicate or dead-code issue; (3) read the file; (4) "
+    "submit the refactored content immediately via apply_and_verify (single file) or "
+    "apply_and_verify_multi (multiple files) — both run parse, lint, type-check, and tests "
+    "internally and roll back atomically with diagnostics on failure; (5) repair from the "
+    "diagnostics and retry. "
+    "You MUST use apply_and_verify or apply_and_verify_multi for all mutations — you cannot "
+    "write files directly. "
     "Do NOT use run_bash to run tests or check the environment — apply_and_verify handles all "
     "verification. Do not touch files under tests/. Stop when apply_and_verify reports committed."
 )
@@ -1504,7 +1535,7 @@ class AgenticHarnessBackend:
         bash_timeout: int = 30,
     ) -> None:
         self.model = model
-        self.name = f"{model}+mcp"
+        self.name = f"{model}+harness"
         self._api_key = api_key
         self.max_iterations = max_iterations
         self.bash_timeout = bash_timeout
@@ -1539,7 +1570,7 @@ class AgenticHarnessBackend:
         except (urllib.error.URLError, TimeoutError, KeyError, ValueError, json.JSONDecodeError) as exc:
             return [], Usage(), str(exc)
 
-    def _execute(self, repo: Path, storage: Storage, name: str, inputs: dict) -> str:
+    def _execute(self, repo: Path, storage: Storage, name: str, inputs: dict, gate_log: list[dict]) -> str:
         if name == "list_files":
             files = sorted(
                 p.relative_to(repo).as_posix()
@@ -1612,8 +1643,48 @@ class AgenticHarnessBackend:
                     test_command=[sys.executable, "-m", "pytest", "-q"],
                     required_gates=REQUIRED_GATES,
                 )
+                gate_log.append({
+                    "tool": name,
+                    "path": path,
+                    "status": record.status,
+                    "gate_details": record.gate_details,
+                    "checks": asdict(record.checks),
+                })
                 if record.status == "committed":
                     return f"committed: {path} ({refactor_kind})"
+                return f"rolled-back: {json.dumps(record.gate_details, sort_keys=True)}"
+            except ValueError as exc:
+                return f"error: {exc}"
+
+        if name == "apply_and_verify_multi":
+            edits = inputs.get("edits", {})
+            refactor_kind = inputs.get("refactor_kind", "refactor")
+            if not isinstance(edits, dict) or not edits:
+                return "error: edits must be a non-empty {path: content} object"
+            if any(p.startswith("tests/") for p in edits):
+                return "error: cannot apply_and_verify_multi on test files"
+            for path in edits:
+                target = (repo / path).resolve()
+                try:
+                    target.relative_to(repo.resolve())
+                except ValueError:
+                    return f"error: path escapes repository: {path}"
+            try:
+                record = verify_edits(
+                    repo,
+                    edits,
+                    test_command=[sys.executable, "-m", "pytest", "-q"],
+                    required_gates=REQUIRED_GATES,
+                )
+                gate_log.append({
+                    "tool": name,
+                    "path": list(edits.keys()),
+                    "status": record.status,
+                    "gate_details": record.gate_details,
+                    "checks": asdict(record.checks),
+                })
+                if record.status == "committed":
+                    return f"committed: {list(edits.keys())} ({refactor_kind})"
                 return f"rolled-back: {json.dumps(record.gate_details, sort_keys=True)}"
             except ValueError as exc:
                 return f"error: {exc}"
@@ -1640,7 +1711,7 @@ class AgenticHarnessBackend:
 
     def run(
         self, repo: Path, user_prompt: str
-    ) -> tuple[dict[str, str], Usage, float, str | None, int]:
+    ) -> tuple[dict[str, str], Usage, float, str | None, int, list[dict]]:
         storage = Storage(redis_url=None, json_path=repo / ".refactorika" / "bench-state.json")
 
         before = {
@@ -1653,6 +1724,7 @@ class AgenticHarnessBackend:
         started = time.perf_counter()
         error: str | None = None
         model_calls = 0
+        gate_log: list[dict] = []
 
         for _ in range(self.max_iterations):
             content, turn_usage, call_error = self._api_call(messages)
@@ -1669,7 +1741,7 @@ class AgenticHarnessBackend:
                 {
                     "type": "tool_result",
                     "tool_use_id": call["id"],
-                    "content": self._execute(repo, storage, call["name"], call.get("input", {})),
+                    "content": self._execute(repo, storage, call["name"], call.get("input", {}), gate_log),
                 }
                 for call in tool_calls
             ]
@@ -1682,7 +1754,7 @@ class AgenticHarnessBackend:
             if not any(part in {".venv", "__pycache__", ".git"} for part in p.parts)
         }
         edits = {path: text for path, text in after.items() if before.get(path) != text}
-        return edits, usage, seconds, error, model_calls
+        return edits, usage, seconds, error, model_calls, gate_log
 
 
 def main() -> int:
