@@ -74,10 +74,21 @@ Claude invokes tool
 | Layer | Files | Responsibility |
 |---|---|---|
 | MCP server | `server.py` | Registers tools with FastMCP; entry point for `mcp dev` |
-| Tools | `tools/*.py` | One file per refactoring capability; thin orchestration |
+| Tools (v1) | `tools/*.py` | One file per refactoring capability; thin orchestration |
+| Tools (v2) | `tools/docs.py`, `tools/duplicates.py`, `tools/dead_code.py` | v2 capabilities: doc generation, duplicate detection, dead code analysis |
 | Analysis | `analysis/parser.py`, `analysis/metrics.py` | Read-only: parse + score source, never write |
+| Analysis (v2) | `analysis/embeddings.py`, `analysis/call_graph.py` | Embedding generation; graph-based reachability for dead code |
 | Transforms | `transforms/rewrite.py` | Write-only: take an AST + edit spec, return new source |
-| Cache | `cache.py` | Redis-backed memoization; keyed by file content hash |
+| Cache | `cache.py` | Redis Iris (Agent Memory, Vector Index, Context Retriever, LangCache) + local JSON fallback |
+
+## v2 MCP Tools
+
+| Tool | Description |
+|---|---|
+| `generate_docs(path)` | Generate or update `.refactorika/context/<module>.md` for a file or directory |
+| `find_duplicates(path)` | Vector search over AST embeddings; returns ranked pairs of semantically similar functions |
+| `find_dead_code(path)` | Graph-based reachability; returns unreachable symbols with a confidence score |
+| `get_context_map(path)` | Return a structural context summary for a module (exports, dependents, architectural notes) from Redis agent memory |
 
 ## Running the Server
 
