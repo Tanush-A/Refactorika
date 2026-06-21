@@ -64,6 +64,45 @@ Items are grouped into **buckets by the files they touch**. Priority: 🔴 can p
   - Where: `core/analyze.py` caches `AnalysisResult` (with absolute `file`/`location`) keyed on content sha1; same pattern in `dead_code.py`'s new cache (B4) and the vector index meta.
   - Fix: store **repo-relative** paths in cached results (and the `meta`), resolving to absolute only at the boundary; or include the path in the cache key. Flushed Redis (`refactorika:cache`, `refactorika:vectors`) as a stopgap.
 
+## Review findings (`/code-review` over the full branch, commit `ca39786`) ⚠️ all open
+
+7-angle review of the whole `refactorika/` package. Verified directly against source. Ranked by severity. These are NEW (separate from A–G above).
+
+### 🔴 Critical — behavior/data loss & broken atomicity
+
+- [ ] **R1 🔴 `transforms/imports.py:89` — `reorder_imports` silently DELETES non-import code between the first and last import.** Plain: it rebuilds the file as `everything-before-first-import + sorted-imports + everything-after-last-import`. Anything sitting *among* the imports that isn't an import — a `LOG = logging.getLogger(...)`, an `if TYPE_CHECKING:` block, `__all__ = [...]`, a conditional/lazy import, comments — gets dropped. The code comment even falsely claims it's preserved. This is the cardinal "changes behavior, not just shape" sin, and it can pass parse+type+(untested)pytest and land.
+  - Fix: replace only the exact import-statement spans (or move them), preserving every non-import node in the region; or only collapse a contiguous run of imports with nothing between them.
+- [ ] **R2 🔴 `core/apply.py:49` — the snapshot crashes on any new/missing file, bypassing the gate stack.** `originals = {p: rp.read_text()}` runs before the try and before any `EditRecord`. For `split_module` (creating a new module — in scope) the path doesn't exist → `FileNotFoundError` escapes uncaught: no record, no rollback. And rollback writes `originals[p]` back, so a newly-*created* file can't be removed on rollback. The atomic path can't do create-file refactors at all.
+  - Fix: treat missing paths as new files (snapshot = sentinel "did not exist"); on rollback, delete files that didn't exist before; wrap snapshot in the failure path.
+- [ ] **R3 🔴 `core/apply.py:77` — the write loop is OUTSIDE the try, so a mid-loop write failure leaves the tree half-edited with no rollback.** Write file A, then B's `write_text` raises (read-only/disk-full/perms) → exception propagates, A stays mutated, `_rollback` never runs.
+  - Fix: move the write loop inside the try (and track which files were written so rollback restores exactly those).
+- [ ] **R4 🔴 `core/apply.py:107` — `_commit_multi` runs outside the try and never checks git's exit code → records `committed` when nothing committed.** A failing `git commit` (hook rejects, locked index, "nothing to commit") is swallowed; `_finalize(..., "committed", ...)` still marks it green. If `git` raises, it's uncaught after files are written. The dashboard's "committed ✓" can be a lie — inverts the "nothing landed unverified" pitch.
+  - Fix: check `returncode` of add+commit; on failure roll back and record `skipped-needs-human` (or `rolled-back`), never `committed`.
+- [ ] **R5 🔴 `memory/vector_index.py:147,205` — under Redis the `module` meta key is dropped, so the C1 "related modules" fix is dead on the demo backend.** `upsert` persists only `file/name/line`; the RediSearch schema has no `module` field; `_redis_query` rebuilds meta from those three. So `context.relevant()` reads `meta.get("module")` → always empty under Redis. Works only on JSON fallback — but the demo runs on Redis. **(This means C1 is only half-fixed.)**
+  - Fix: add a `module` TextField to the schema and include it in upsert mapping + query meta; or store the full meta dict as a JSON blob field.
+
+### 🟠 Medium — gates & cache correctness
+
+- [ ] **R6 🟠 `core/gates.py:62` — `ruff format` mutates the file *after* parse-gate, so committed bytes ≠ parse-validated bytes ≠ the recorded `diff`.** `record.diff` is the agent's proposed text; the bytes committed are the reformatted version parse_gate never saw. Behavior is still type/test-verified, but the audit trail doesn't match what landed.
+  - Fix: format the proposed content in-memory before parse-gating and before building the diff, so one canonical byte-string is gated, recorded, and committed.
+- [ ] **R7 🟠 `core/gates.py:96` — `test_gate` treats any non-0/non-5 pytest exit as "behavior failed."** A pre-existing collection/import error (exit 2), internal error (3), or usage error (4) elsewhere makes *every* refactor roll back, mislabeled as the refactor breaking behavior. One broken unrelated test blocks all refactoring.
+  - Fix: distinguish exit codes — 0 pass, 1 real failure, 5 skip/no-tests, 2/3/4 → harness error (`None`/skip-and-record, not a behavior failure).
+- [ ] **R8 🟠 `core/gates.py:53` — `_ruff_violation_count` returns `0` on empty/malformed ruff output.** A ruff config error or non-JSON banner → `JSONDecodeError` → `0` → lint gate reports "clean" → a real lint regression passes.
+  - Fix: distinguish "0 violations" from "couldn't parse ruff output"; on parse failure, skip-and-record (or fail), don't treat as clean.
+- [ ] **R9 🟠 `analysis/duplicates.py:158` — the structural-fingerprint cache key `fp:{file}:{name}` is content-blind.** Edit a function's body (same name/file) and re-run: `cache_get` returns the stale sha1, grouping it with old structural twins. Every other cache keys on content hash; this one doesn't. (Same family as G1.)
+  - Fix: key on a content/AST signature (sha1 of the canonical type stream or function text), not file+name.
+- [ ] **R10 🟠 `core/storage.py:77` (`append_log`) — non-atomic read-modify-write of `state.json`, no lock.** Two concurrent `apply` calls on the JSON backend each read→append→write; the second clobbers the first → a record vanishes, or an interleaved write corrupts the file (then every read raises, killing the offline path). Realistic given the parallel-agent build model.
+  - Fix: append via atomic write (tmp file + `os.replace`) and/or a file lock; or use an append-only log file instead of rewriting one JSON blob.
+
+### 🟡 Also noted (lower severity / cleanup / efficiency)
+
+- [ ] **R11 🟠 `core/storage.py count_attempts` (Bucket-E code) uses hard `r["status"]`/`r["file"]`** → `KeyError` aborts `apply` on any malformed/older/externally-seeded log record. Read defensively (`.get`), like `agent_memory.history` does.
+- [ ] **R12 🟡 `embeddings.py` reloads the ~90MB SentenceTransformer model per `embed_one` call** (no module-level caching), and `duplicates.py` embeds every function **twice** (upsert loop + query loop) → ~2N model loads. Cache the model in a global; embed once into a dict and reuse; batch via `embed(list)`.
+- [ ] **R13 🟡 `embeddings.available()` can return True while `embed()` raises** (model download fails at runtime, or openai selected but sentence-transformers missing) — the runtime failure is a non-`ImportError` that escapes the guard. Make `available()` and the provider choice agree, and wrap runtime load failures.
+- [ ] **R14 🟡 `memory/vector_index.py:74` — index name is frozen at `__init__` from `embeddings._PROVIDER/_DIM` defaults (`none`/384), which are only set after the first `embed()`.** With `REFACTORIKA_EMBED=openai` (1536-dim) the index is created at dim 384 → later 1536 vectors mismatch → silent fallback. Resolve provider/dim lazily, after the first embed.
+- [ ] **R15 🟡 Reuse: `parser.py` is the shared AST front end, but `analyze.py`, `call_graph.py`, and `transforms/dead.py` re-implement AST walking / symbol-name / call-extraction; `_collect_py_files` exists twice with *different* skip sets** (so duplicates vs dead-code scan different file sets); module/stdlib classification is coded 3× with diverging rules (analyzer vs imports-transform can disagree → a never-converging re-propose loop). Consolidate to one helper each.
+- [ ] **R16 🟡 `docs_gen.py` flag detection is substring-over-source:** the `bare except:` rule is dead (never matches real `except:`), and `getattr(` matches inside comments/strings → false data written into context files. Use the AST (dead_code.py already has the real walker).
+
 ## Deferred — intentional `[decide]`/`[tune]` from the spec (⚪ low priority)
 
 Explicitly left open in `v2_spec.md §14`:
