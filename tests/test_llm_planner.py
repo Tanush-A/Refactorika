@@ -1,0 +1,146 @@
+"""LLM planner + decision-memory consistency — exercised fully offline via a stub client.
+
+The key property: two structurally-identical god functions get decomposed with the SAME
+helper names, because the second decomposition recalls the first from agent memory. That
+is the "Redis is decision memory, not a cache" behaviour, proven without a network call.
+"""
+
+from __future__ import annotations
+
+from refactorika.core.storage import Storage
+from refactorika.graph.resolver import build_graph
+from refactorika.llm.client import LLMClient, stub_key
+from refactorika.memory.agent_memory import AgentMemory
+from refactorika.pipeline.planner_llm import (
+    _shape_pattern,
+    make_llm_planner,
+)
+
+# A long-ish function (>= _MIN_GOD_LINES lines) to trigger decomposition.
+_GOD = (
+    "def score(values, mode, bonus):\n"
+    "    total = 0\n"
+    "    for v in values:\n"
+    "        if v > 0:\n"
+    "            if mode == 'a':\n"
+    "                total += v * 2\n"
+    "            elif mode == 'b':\n"
+    "                total += v * 3\n"
+    "            else:\n"
+    "                total += v\n"
+    "    if bonus:\n"
+    "        total += 10\n"
+    "    if total > 100:\n"
+    "        total = 100\n"
+    "    return total\n"
+)
+
+_DECOMPOSED = (
+    "def _accumulate(values, mode):\n"
+    "    total = 0\n"
+    "    for v in values:\n"
+    "        if v > 0:\n"
+    "            if mode == 'a':\n"
+    "                total += v * 2\n"
+    "            elif mode == 'b':\n"
+    "                total += v * 3\n"
+    "            else:\n"
+    "                total += v\n"
+    "    return total\n\n\n"
+    "def score(values, mode, bonus):\n"
+    "    total = _accumulate(values, mode)\n"
+    "    if bonus:\n"
+    "        total += 10\n"
+    "    if total > 100:\n"
+    "        total = 100\n"
+    "    return total\n"
+)
+
+
+def _stub_client_for_graph(graph, root: str) -> LLMClient:
+    """Build a stub keyed on the exact function source the planner will send, covering
+    both the first prompt (no prior) and the recall prompt (with a prior decision)."""
+    from refactorika.core.schema import RefactorDecision
+    from refactorika.pipeline.planner_llm import (
+        _SYSTEM,
+        _decompose_prompt,
+        _god_functions,
+        _shape_pattern,
+    )
+
+    response = {"new_source": _DECOMPOSED, "helper_names": ["_accumulate"],
+                "rationale": "split accumulation out"}
+    model = LLMClient().model
+    stub = {}
+    for _qual, source in _god_functions(graph, root):
+        prior = RefactorDecision(pattern=_shape_pattern(source),
+                                 transform_kind="decompose_function", target="x",
+                                 choice={"helper_names": ["_accumulate"]})
+        for p in (_decompose_prompt(source, None), _decompose_prompt(source, prior)):
+            stub[stub_key(model, _SYSTEM, p)] = response
+    return LLMClient(stub=stub)
+
+
+def test_llm_plan_proposes_decomposition(tmp_path):
+    (tmp_path / "m.py").write_text(_GOD)
+    g = build_graph(str(tmp_path))
+    planner = make_llm_planner(client=_stub_client_for_graph(g, str(tmp_path)),
+                               memory=AgentMemory(Storage(redis_url=None,
+                                                          json_path=tmp_path / "s.json")))
+    plan = planner(g, root=str(tmp_path))
+    decompose = [it for it in plan.items if it.spec.kind == "decompose_function"]
+    assert len(decompose) == 1
+    assert decompose[0].spec.target == "m.score"
+    assert "_accumulate" in decompose[0].spec.params["new_source"]
+
+
+def test_llm_decomposition_flows_through_gates_and_commits(tmp_path):
+    """End-to-end: LLM proposes a decomposition, it passes the gate stack, commits green."""
+    import subprocess
+
+    from refactorika.pipeline.orchestrator import run_pipeline
+
+    (tmp_path / "m.py").write_text(_GOD)
+    (tmp_path / "test_m.py").write_text(
+        "from m import score\n\n"
+        "def test_score():\n"
+        "    assert score([1, 2], 'a', True) == (2 + 4) + 10\n"
+    )
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "t"], capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "t@t"], capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "base"], capture_output=True)
+
+    g = build_graph(str(tmp_path))
+    storage = Storage(redis_url=None, json_path=tmp_path / "s.json")
+    planner = make_llm_planner(client=_stub_client_for_graph(g, str(tmp_path)),
+                               memory=AgentMemory(storage))
+    res = run_pipeline(str(tmp_path), apply=False, planner=planner, storage=storage)
+
+    decompose = [r for r in res.records
+                 if r["refactor_kind"] == "decompose_function" and r["status"] == "committed"]
+    assert decompose, "expected a committed decomposition"
+    assert res.finale_tests is True  # behavior preserved end to end
+
+
+def test_decision_memory_makes_naming_consistent(tmp_path):
+    # Two identical-shape functions in different modules.
+    (tmp_path / "a.py").write_text(_GOD)
+    (tmp_path / "b.py").write_text(_GOD)
+    g = build_graph(str(tmp_path))
+
+    memory = AgentMemory(Storage(redis_url=None, json_path=tmp_path / "s.json"))
+    client = _stub_client_for_graph(g, str(tmp_path))
+    planner = make_llm_planner(client=client, memory=memory)
+    plan = planner(g, root=str(tmp_path))
+
+    # both god functions are decomposed
+    targets = {it.spec.target for it in plan.items if it.spec.kind == "decompose_function"}
+    assert targets == {"a.score", "b.score"}
+
+    # the decision was recorded under the shared structural pattern, with the helper name
+    pattern = _shape_pattern(_GOD)
+    decision = memory.get_decision(pattern)
+    assert decision is not None
+    assert decision.choice["helper_names"] == ["_accumulate"]

@@ -152,9 +152,9 @@ def _is_improvement(metric: str, delta: int) -> bool:
 
 def _llm_planner():
     try:
-        from refactorika.pipeline.planner_llm import llm_plan
+        from refactorika.pipeline.planner_llm import make_llm_planner
 
-        return llm_plan
+        return make_llm_planner()
     except Exception:
         typer.echo(_c("  --llm requested but LLM planner unavailable; using deterministic plan.",
                       _YELLOW))

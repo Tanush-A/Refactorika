@@ -16,8 +16,12 @@ from refactorika.graph.model import Graph
 from refactorika.graph.order import impact_of, reachable_from, topo_order
 
 
-def deterministic_plan(graph: Graph) -> Worklist:
-    """Mechanical, no-LLM plan: remove dead code + clean every module, leaf-to-root."""
+def deterministic_plan(graph: Graph, root: str | None = None) -> Worklist:
+    """Mechanical, no-LLM plan: remove dead code + clean every module, leaf-to-root.
+
+    *root* is accepted for a uniform planner signature (the LLM planner needs it to read
+    function source); the deterministic plan does not use it.
+    """
     order, cycles = topo_order(graph)
     pos = {q: i for i, q in enumerate(order)}
     items: list[PlanItem] = []

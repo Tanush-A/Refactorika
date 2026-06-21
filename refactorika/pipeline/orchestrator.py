@@ -52,7 +52,7 @@ def run_pipeline(
     # Authoritative baseline: the repo must start green, or "we kept it green" is empty.
     baseline_ok, baseline_detail = (checker.run_full_suite() if run_tests else (None, "skipped"))
 
-    plan = (planner or deterministic_plan)(graph)
+    plan = (planner or deterministic_plan)(graph, root=workdir)
     records: list[dict] = []
 
     for item in plan.items:

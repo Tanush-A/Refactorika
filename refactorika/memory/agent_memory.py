@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from refactorika.core.schema import EditRecord, ModuleContext
+from refactorika.core.schema import ModuleContext, RefactorDecision
 from refactorika.core.storage import Storage
 
 _CTX_KEY = "refactorika:memory:context"
+_DECISION_KEY = "refactorika:memory:decisions"
 
 
 class AgentMemory:
@@ -50,6 +51,38 @@ class AgentMemory:
             k: ModuleContext.from_dict(v)
             for k, v in data.get("context", {}).items()
         }
+
+    # --- refactoring decisions (drive cross-file consistency) ----------------
+
+    def put_decision(self, decision: RefactorDecision) -> None:
+        """Record a choice (pattern -> what was decided) so later nodes stay consistent."""
+        payload = json.dumps(decision.to_dict())
+        if self._storage._redis:
+            self._storage._redis.hset(_DECISION_KEY, decision.pattern, payload)
+        else:
+            data = self._storage._read_state()
+            data.setdefault("decisions", {})[decision.pattern] = decision.to_dict()
+            self._storage._write_state(data)
+
+    def get_decision(self, pattern: str) -> RefactorDecision | None:
+        """Recall a prior decision for *pattern*, or None — the consistency lookup."""
+        if self._storage._redis:
+            raw = self._storage._redis.hget(_DECISION_KEY, pattern)
+            if raw:
+                return RefactorDecision.from_dict(json.loads(raw))
+        else:
+            data = self._storage._read_state()
+            entry = data.get("decisions", {}).get(pattern)
+            if entry:
+                return RefactorDecision.from_dict(entry)
+        return None
+
+    def all_decisions(self) -> list[RefactorDecision]:
+        if self._storage._redis:
+            raw = self._storage._redis.hgetall(_DECISION_KEY)
+            return [RefactorDecision.from_dict(json.loads(v)) for v in raw.values()]
+        data = self._storage._read_state()
+        return [RefactorDecision.from_dict(v) for v in data.get("decisions", {}).values()]
 
     # --- refactor history ----------------------------------------------------
 
