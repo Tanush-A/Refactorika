@@ -6,7 +6,14 @@ import difflib
 import subprocess
 from pathlib import Path
 
-from .gates import lint_gate, parse_gate, ruff_baseline, test_gate, typecheck_gate
+from .gates import (
+    lint_gate,
+    parse_gate,
+    pyright_baseline,
+    ruff_baseline,
+    test_gate,
+    typecheck_gate,
+)
 from .schema import EditRecord
 from .storage import Storage
 
@@ -70,8 +77,9 @@ def apply_and_verify_multi(
             return _finalize(record, "rolled-back", f"parse failed for {p}: {detail}", storage)
     checks.parse = True
 
-    # Capture ruff baselines before writing.
+    # Capture lint + type baselines before writing (reject only *new* violations/errors).
     baselines = {p: ruff_baseline(rp) for p, rp in paths.items()}
+    type_baselines = {p: pyright_baseline(rp) for p, rp in paths.items()}
 
     # Write all files.
     for p, new_content in edits.items():
@@ -86,9 +94,9 @@ def apply_and_verify_multi(
                 return _rollback(record, paths, originals, f"lint failed for {p}: {detail}", storage)
         checks.lint = True
 
-        # Gate 3 — typecheck each touched file.
+        # Gate 3 — typecheck each touched file (only new type errors fail).
         for p, rp in paths.items():
-            ok, detail = typecheck_gate(rp)
+            ok, detail = typecheck_gate(rp, type_baselines[p])
             if ok is False:
                 checks.typecheck = False
                 return _rollback(record, paths, originals, f"typecheck failed for {p}: {detail}", storage)

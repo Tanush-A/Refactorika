@@ -66,21 +66,42 @@ def lint_gate(path: Path, baseline_violations: int) -> GateResult:
     return True, f"ruff clean ({new_count} <= {baseline_violations} baseline)"
 
 
-def typecheck_gate(path: Path) -> GateResult:
-    """pyright must report zero errors on the touched file."""
-    if _tool("pyright") is None:
-        return None, "pyright not installed — skipped"
+def _pyright_error_count(path: Path) -> Optional[int]:
+    """pyright error count for a file; None if output is unparseable. Assumes pyright installed."""
     out = subprocess.run(
         [_tool("pyright"), "--outputjson", str(path)], capture_output=True, text=True
     )
     try:
-        summary = json.loads(out.stdout).get("summary", {})
-        errors = summary.get("errorCount", 0)
+        return json.loads(out.stdout).get("summary", {}).get("errorCount", 0)
     except (json.JSONDecodeError, AttributeError):
+        return None
+
+
+def pyright_baseline(path: Path) -> int:
+    """Type-error count on the original file, captured before the edit (0 if pyright absent)."""
+    if _tool("pyright") is None:
+        return 0
+    count = _pyright_error_count(path)
+    return count if count is not None else 0
+
+
+def typecheck_gate(path: Path, baseline_errors: int = 0) -> GateResult:
+    """Reject only *new* type errors vs the pre-edit baseline (mirrors lint_gate).
+
+    A behavior-preserving refactor that leaves a pre-existing type complaint
+    (e.g. a function that already returned ``int | None``) passes; only an edit
+    that makes the type-error count go *up* is rolled back. Absolute "must be
+    type-perfect" rejection over-rejects correct code, so we ask the same
+    question as the lint gate: did this edit make types *worse*?
+    """
+    if _tool("pyright") is None:
+        return None, "pyright not installed — skipped"
+    count = _pyright_error_count(path)
+    if count is None:
         return False, "pyright: unparseable output"
-    if errors:
-        return False, f"pyright: {errors} type error(s)"
-    return True, "pyright clean"
+    if count > baseline_errors:
+        return False, f"pyright: {count - baseline_errors} new type error(s)"
+    return True, f"pyright clean ({count} <= {baseline_errors} baseline)"
 
 
 def test_gate(repo_dir: Path) -> GateResult:
