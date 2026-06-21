@@ -24,9 +24,20 @@ GateResult = tuple[Optional[bool], str]
 
 
 def _tool(name: str) -> Optional[str]:
-    """Absolute path to a CLI tool, or None. Absolute so it resolves under any subprocess cwd."""
+    """Absolute path to a CLI tool, or None. Absolute so it resolves under any subprocess cwd.
+
+    Falls back to the directory of the running interpreter (the venv's bin), so tools
+    installed in the active environment are found even when it isn't on PATH.
+    """
     found = shutil.which(name)
-    return os.path.abspath(found) if found else None
+    if found:
+        return os.path.abspath(found)
+    import sys
+
+    candidate = Path(sys.executable).parent / name
+    if candidate.exists():
+        return str(candidate)
+    return None
 
 
 def _has_error(node) -> bool:
@@ -83,19 +94,29 @@ def typecheck_gate(path: Path) -> GateResult:
     return True, "pyright clean"
 
 
-def test_gate(repo_dir: Path) -> GateResult:
-    """pytest over the repo. Exit 5 (no tests collected) -> skip; type-clean != correct."""
+def test_gate(repo_dir: Path, node_ids: Optional[list[str]] = None) -> GateResult:
+    """pytest over the repo (or only *node_ids* for impact-scoped runs).
+
+    Passing the impacted test node ids (``path::test_name``) runs only the tests a
+    change can affect — the efficiency win — instead of the whole suite every edit.
+    Exit 5 (no tests collected) -> skip; type-clean != behavior-preserving.
+    """
     if _tool("pytest") is None:
         return None, "pytest not installed — skipped"
+    selection = list(node_ids) if node_ids else []
     out = subprocess.run(
-        [_tool("pytest"), "-q", "--no-header"], cwd=str(repo_dir), capture_output=True, text=True
+        [_tool("pytest"), "-q", "--no-header", *selection],
+        cwd=str(repo_dir),
+        capture_output=True,
+        text=True,
     )
     if out.returncode == 5:
-        return None, "no tests cover this file — skipped"
+        return None, "no tests cover this change — skipped"
     if out.returncode != 0:
         tail = (out.stdout or out.stderr).strip().splitlines()[-1:] or ["tests failed"]
         return False, f"pytest failed: {tail[0]}"
-    return True, "pytest green"
+    scope = f"{len(selection)} impacted test(s)" if selection else "full suite"
+    return True, f"pytest green ({scope})"
 
 
 def ruff_baseline(path: Path) -> int:
