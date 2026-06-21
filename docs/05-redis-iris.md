@@ -4,7 +4,7 @@ Most refactoring tools are stateless: every run re-parses the world from scratch
 
 Redis is the **primary** backend, accessed through **RedisVL** (the AI-native Redis client). Every component degrades to a local `.refactorika/` file so the harness — and the demo — runs fully offline. Redis is what makes it fast, persistent, *and properly searchable* (and *visualizable* in Redis Insight during the demo); it is never a hard dependency.
 
-> **The hybrid search engine needs Redis 8.4+ with the Query Engine** (Redis Cloud, Redis Stack, or Redis 8 OSS) — a bare `redis-server` has no `FT.*`/`FT.HYBRID`. When the Query Engine is absent, the index degrades to a brute-force scan with identical (slower) results.
+> **The hybrid search engine needs Redis 8.4+ with the Query Engine** (`FT.HYBRID` is an 8.4 command). **As run: local Docker `redis:8`** — `docker run -d --name refactorika-redis --restart=always -p 6380:6379 redis:8` (8.8 — has the Query Engine), then `REDIS_URL=redis://localhost:6380`; auto-restarts with Docker, nothing to launch manually. Redis Cloud / Redis Stack 8.4+ work identically. A bare Homebrew `redis-server` has **no** `FT.*` (Homebrew strips the modules even on Redis 8) → the index degrades to a brute-force vector scan with identical (slower) results, no BM25 fusion.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -95,12 +95,16 @@ This is what powers incremental `generate_docs` (retrieve last context → diff 
 | `get_context_map` | Agent Memory + Context Retriever |
 | `apply_and_verify` | Context Retriever (conventions) → writes refactor history to Agent Memory |
 
-## Implementation notes (RedisVL) — as built
+## Implementation notes (RedisVL) — as built & live-verified
 
-- **Client:** `redisvl` 0.20+ — index via `SearchIndex.from_dict(schema, redis_url=…)`, `.create(overwrite=False)`, `.load([doc], keys=[id])`, `.query(hq)`; hybrid via `HybridQuery(text=…, text_field_name="body", vector=…, vector_field_name="embedding", combination_method="RRF", text_scorer="BM25STD", filter_expression=Tag("module")==…, num_results=k)`.
-- **Schema (per function doc):** `vector` `embedding` (HNSW, cosine, float32, dims = provider's), `text` `body` (BM25STD), `numeric` `line`, `tag` `file`/`module`/`name`/`fingerprint`. Index name `refactorika:vec:{provider}:{dim}` from `embeddings.provider_dim()` so a provider switch can't mix dimensions.
-- **`VectorIndex` API:** `upsert(key, vector, meta=None, *, text="")` · `query(vector, k, threshold)` (vector-only) · `query_hybrid(vector, text, k, filters)` · `module_filter(m)` · `drop()`. `find_duplicates` embeds each function **once**, upserts with text+fingerprint, queries hybrid, then recomputes true cosine between the two known vectors for the reported `similarity` (RRF scores aren't cosine).
-- **Versions:** `HybridQuery` (FT.HYBRID) needs Redis ≥ 8.4 + redis-py ≥ 7.1 (Redis Cloud qualifies). When `storage._redis is None` or redisvl is absent, `query_hybrid` **delegates to vector-only `query()`** (brute-force cosine over JSON) — same correctness floor, BM25 dropped.
+- **Client:** `redisvl` 0.20+ — index via `SearchIndex.from_dict(schema, redis_url=…)`, `.create(overwrite=False)`, `.load([doc], keys=[id])`, `.query(hq)`; hybrid via `HybridQuery(text=…, text_field_name="body", vector=…, vector_field_name="embedding", combination_method="RRF", text_scorer="BM25STD", num_results=k, stopwords=None)`.
+- **Schema (per function doc), index `refactorika:vec:v2:{provider}:{dim}`:** `vector` `embedding` (HNSW, cosine, float32, dims from `embeddings.provider_dim()`), `text` `body` (BM25STD), `numeric` `line`, `tag` `key`/`file`/`module`/`name`/`fingerprint`. The `{provider}:{dim}` namespace stops a provider switch mixing dimensions; the `v2` schema tag forces a fresh index when the field set changes.
+- **Two live-fix gotchas (FT.HYBRID is new/experimental):**
+  - **`stopwords=None`** is required — RedisVL's default `stopwords="english"` pulls in `nltk`; without it `HybridQuery` raises and returns nothing. Code identifiers aren't English stopwords anyway.
+  - **`HybridQuery` results carry no doc `id`** (unlike `VectorQuery`), so we store the upsert key in a `key` tag field and read it back. The RedisVL "experimental" `UserWarning`s are silenced in `vector_index.py`.
+- **`VectorIndex` API:** `upsert(key, vector, meta=None, *, text="")` · `query(vector, k, threshold)` (vector-only) · `query_hybrid(vector, text, k, filters)` · `module_filter(m)` · `drop()`. `find_duplicates` embeds each function **once**, upserts with text+fingerprint, queries hybrid, then recomputes true cosine between the two known vectors for the reported `similarity` (RRF scores aren't cosine; `find_duplicates`/`find_related` also skip test files).
+- **Thresholds (tuned on real embeddings):** text-embedding-3-small scores code near-duplicates ~0.55–0.7, not 0.8+ — `find_duplicates` default `0.55`, `find_related` `0.5`.
+- **Fallback:** when `storage._redis is None`, redisvl is absent, or `FT.HYBRID` errors, `query_hybrid` **delegates to vector-only query on the live index** (or brute-force JSON cosine offline) — same correctness floor, BM25 dropped.
 - **Fusion default:** **RRF** (no tuning, balanced); switch to linear with an alpha weight only if one signal should dominate.
 
 ## Demo moments (Redis Insight makes the memory visible)
