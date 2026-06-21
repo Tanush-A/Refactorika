@@ -45,6 +45,7 @@ strict = true
 [tool.ruff]
 src = ["refactorika"]
 target-version = "py311"
+line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
