@@ -13,10 +13,11 @@ storage JSON state file and queried with brute-force cosine similarity.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from refactorika.core.storage import Storage
+    from refactorika.llm.providers import EmbeddingProvider
 
 
 @dataclass
@@ -42,36 +43,41 @@ def _cosine(a: list[float], b: list[float]) -> float:
         return dot / (norm_a * norm_b + 1e-9)
 
 
-def _current_index_name() -> str:
-    """Return the RediSearch index name based on current embedding provider/dim."""
+def _provider_name_and_dim(embed_provider: "Optional[EmbeddingProvider]") -> tuple[str, int]:
+    """(name, dim) for the active embedding provider — the single source of index identity.
+
+    Falls back to ("local", 384) so the index name is stable even when no provider is
+    importable (the JSON fallback path doesn't care about the name).
+    """
     try:
-        from refactorika.analysis import embeddings
+        provider = embed_provider
+        if provider is None:
+            from refactorika.llm.providers import get_embedding_provider
 
-        provider = embeddings._PROVIDER if embeddings._PROVIDER != "none" else "local"
-        dim = embeddings._DIM if embeddings._DIM else 384
+            provider = get_embedding_provider()
+        return provider.name, provider.dim()
     except Exception:
-        provider = "local"
-        dim = 384
-    return f"refactorika:vec:{provider}:{dim}"
-
-
-def _current_dim() -> int:
-    try:
-        from refactorika.analysis import embeddings
-
-        return embeddings._DIM if embeddings._DIM else 384
-    except Exception:
-        return 384
+        return "local", 384
 
 
 class VectorIndex:
     """Vector similarity index with RediSearch HNSW or JSON brute-force fallback."""
 
-    def __init__(self, storage: "Storage") -> None:
+    def __init__(
+        self,
+        storage: "Storage",
+        embed_provider: "Optional[EmbeddingProvider]" = None,
+        namespace: str = "",
+    ) -> None:
         self._storage = storage
         self._redis_client = storage._redis  # may be None
         self._use_redis = False
-        self._index_name: str = _current_index_name()
+        self._provider_name, self._dim = _provider_name_and_dim(embed_provider)
+        # A namespace gives an independent vector space (e.g. "codebase" symbols must not
+        # collide with decision-memory vectors, which share this class but a different store).
+        suffix = f":{namespace}" if namespace else ""
+        self._index_name: str = f"refactorika:vec:{self._provider_name}:{self._dim}{suffix}"
+        self._bucket: str = f"vectors:{namespace}" if namespace else "vectors"
 
         if self._redis_client is not None:
             self._use_redis = self._ensure_redis_index()
@@ -83,15 +89,14 @@ class VectorIndex:
     def _ensure_redis_index(self) -> bool:
         """Try to create or verify the RediSearch vector index. Returns True on success."""
         try:
-            from redis.commands.search.field import VectorField, TextField, NumericField
+            from redis.commands.search.field import NumericField, TextField, VectorField
             from redis.commands.search.indexDefinition import IndexDefinition, IndexType
         except ImportError:
             return False
 
         try:
-            dim = _current_dim()
-            index_name = _current_index_name()
-            self._index_name = index_name
+            dim = self._dim
+            index_name = self._index_name
 
             try:
                 self._redis_client.ft(index_name).info()
@@ -112,6 +117,7 @@ class VectorIndex:
                 TextField("file"),
                 TextField("name"),
                 NumericField("line"),
+                TextField("meta_json"),  # full meta dict (qualname, kind, sha, …)
             )
             definition = IndexDefinition(
                 prefix=[f"{index_name}:doc:"],
@@ -130,10 +136,10 @@ class VectorIndex:
     # ------------------------------------------------------------------
 
     def _json_read(self) -> dict:
-        """Read the full JSON state dict from storage."""
+        """Read the full JSON state dict from storage (ensuring this index's bucket exists)."""
         data = self._storage._read_json()
-        if "vectors" not in data:
-            data["vectors"] = {}
+        if self._bucket not in data:
+            data[self._bucket] = {}
         return data
 
     def _json_write(self, data: dict) -> None:
@@ -148,6 +154,7 @@ class VectorIndex:
         """Store or update a vector with associated metadata."""
         if self._use_redis:
             try:
+                import json
                 import struct
 
                 blob = struct.pack(f"{len(vector)}f", *vector)
@@ -156,6 +163,7 @@ class VectorIndex:
                     "file": meta.get("file", ""),
                     "name": meta.get("name", ""),
                     "line": meta.get("line", 0),
+                    "meta_json": json.dumps(meta),
                 }
                 self._redis_client.hset(self._redis_doc_key(key), mapping=mapping)
                 return
@@ -163,8 +171,24 @@ class VectorIndex:
                 self._use_redis = False  # fall through to JSON
 
         data = self._json_read()
-        data["vectors"][key] = {"vector": vector, "meta": meta}
+        data[self._bucket][key] = {"vector": vector, "meta": meta}
         self._json_write(data)
+
+    def get_meta(self, key: str) -> "Optional[dict]":
+        """Return the stored meta for *key*, or None if absent (for incremental re-index)."""
+        if self._use_redis:
+            try:
+                import json
+
+                raw = self._redis_client.hget(self._redis_doc_key(key), "meta_json")
+                if raw is None:
+                    return None
+                return json.loads(raw)
+            except Exception:
+                self._use_redis = False
+
+        entry = self._json_read()[self._bucket].get(key)
+        return entry.get("meta") if entry else None
 
     def query(
         self, vector: list[float], k: int = 5, threshold: float = 0.0
@@ -182,6 +206,7 @@ class VectorIndex:
         self, vector: list[float], k: int, threshold: float
     ) -> list[Neighbor]:
         import struct
+
         from redis.commands.search.query import Query
 
         blob = struct.pack(f"{len(vector)}f", *vector)
@@ -202,11 +227,17 @@ class VectorIndex:
             similarity = 1.0 - distance
             if similarity >= threshold:
                 key = doc.id.replace(f"{self._index_name}:doc:", "", 1)
-                meta = {
-                    "file": getattr(doc, "file", ""),
-                    "name": getattr(doc, "name", ""),
-                    "line": int(getattr(doc, "line", 0)),
-                }
+                raw = getattr(doc, "meta_json", "")
+                if raw:
+                    import json
+
+                    meta = json.loads(raw)
+                else:  # docs written before meta_json existed
+                    meta = {
+                        "file": getattr(doc, "file", ""),
+                        "name": getattr(doc, "name", ""),
+                        "line": int(getattr(doc, "line", 0)),
+                    }
                 neighbors.append(Neighbor(key=key, score=similarity, meta=meta))
 
         neighbors.sort(key=lambda n: n.score, reverse=True)
@@ -216,7 +247,7 @@ class VectorIndex:
         self, vector: list[float], k: int, threshold: float
     ) -> list[Neighbor]:
         data = self._json_read()
-        vectors_store: dict = data.get("vectors", {})
+        vectors_store: dict = data.get(self._bucket, {})
 
         scored: list[Neighbor] = []
         for key, entry in vectors_store.items():
@@ -241,5 +272,5 @@ class VectorIndex:
                 pass
 
         data = self._json_read()
-        data["vectors"] = {}
+        data[self._bucket] = {}
         self._json_write(data)

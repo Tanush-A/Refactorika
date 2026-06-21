@@ -38,7 +38,8 @@ class DecisionMemory:
         self.storage = storage
         self.agent = agent_memory or AgentMemory(storage)
         self.embed = embed_provider or get_embedding_provider()
-        self.vectors = vector_index or VectorIndex(storage)
+        # Index identity (name/dim) must track the *same* provider whose vectors we store.
+        self.vectors = vector_index or VectorIndex(storage, embed_provider=self.embed)
         self.threshold = threshold
         self.semantic = self.embed.available()
         self.last_match: Optional[dict] = None  # what recall() returned last (for --show-memory)

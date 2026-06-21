@@ -41,6 +41,9 @@ def _entry(
     show_plan: bool = typer.Option(False, "--show-plan", help="Print the plan and exit."),
     show_memory: bool = typer.Option(False, "--show-memory",
                                      help="Print stored refactor decisions (from Redis) and exit."),
+    show_similar: str = typer.Option(None, "--show-similar", metavar="QUALNAME",
+                                     help="Embed the codebase and print a symbol's nearest "
+                                          "semantic neighbors, then exit."),
     no_tests: bool = typer.Option(False, "--no-tests", help="Skip the test gates (faster)."),
     use_llm: bool = typer.Option(False, "--llm", help="Use the LLM planner (needs API key)."),
     rename: list[str] = typer.Option(
@@ -57,6 +60,9 @@ def _entry(
         return
     if show_memory:
         _print_memory()
+        return
+    if show_similar:
+        _print_similar(path, show_similar)
         return
     _run(path, apply=apply, run_tests=not no_tests, use_llm=use_llm, renames=renames)
 
@@ -177,6 +183,42 @@ def _print_memory() -> None:
         typer.echo(f"      {_DIM}shape={d.pattern}{_RESET}")
     if not decisions:
         typer.echo(f"  {_DIM}(none yet — run with --llm to record decisions){_RESET}")
+    typer.echo("")
+
+
+def _print_similar(path: str, qualname: str) -> None:
+    from refactorika.graph.resolver import build_graph
+    from refactorika.llm.providers import get_embedding_provider
+    from refactorika.memory.codebase_index import (
+        build_codebase_index,
+        codebase_vector_index,
+        similar_symbols,
+    )
+
+    storage = Storage()
+    provider = get_embedding_provider()
+    typer.echo(f"\n{_BOLD}Semantic neighbors{_RESET}  ·  store={storage.backend}  ·  "
+               f"embed={provider.name}  ·  available={'yes' if provider.available() else 'no'}")
+    if not provider.available():
+        typer.echo(f"  {_DIM}(no embedding provider — install the 'semantic' extra "
+                   f"or run Ollama){_RESET}\n")
+        return
+
+    g = build_graph(path)
+    if qualname not in g.symbols:
+        typer.echo(f"  {_c('not found', _RED)}: {qualname}\n")
+        return
+    vectors = codebase_vector_index(storage, embed_provider=provider)
+    stats = build_codebase_index(g, path, vectors, embed_provider=provider)
+    typer.echo(f"  {_DIM}indexed {stats.embedded} symbol(s), {stats.skipped} unchanged, "
+               f"{stats.total} total{_RESET}")
+    hits = similar_symbols(qualname, g, vectors, embed_provider=provider, k=5)
+    typer.echo(f"\n  {_BOLD}{qualname}{_RESET}")
+    if not hits:
+        typer.echo(f"    {_DIM}(no neighbors above threshold){_RESET}")
+    for n in hits:
+        name = n.meta.get("qualname", n.key)
+        typer.echo(f"    {n.score:5.3f}  {name}")
     typer.echo("")
 
 

@@ -16,17 +16,33 @@ import hashlib
 from pathlib import Path
 from typing import Optional
 
-from refactorika.analysis.parser import canonical_type_stream, function_text, get_tree
+from refactorika.analysis.parser import (
+    canonical_type_stream,
+    function_text,
+    get_tree,
+    max_nesting_depth,
+)
 from refactorika.core.schema import PlanItem, RefactorDecision, TransformSpec, Worklist
 from refactorika.core.storage import Storage
 from refactorika.graph.model import Graph
 from refactorika.graph.order import impact_of, topo_order
 from refactorika.llm.client import LLMClient
 from refactorika.memory.agent_memory import AgentMemory
+from refactorika.memory.codebase_index import (
+    build_codebase_index,
+    codebase_vector_index,
+    similar_symbols,
+)
 from refactorika.memory.decision_memory import DecisionMemory
 from refactorika.pipeline.planner import deterministic_plan
 
-_MIN_GOD_LINES = 12  # functions at/over this many lines are decomposition candidates
+# A function is a decomposition candidate if it hits ANY god-function shape — not a single
+# line-count proxy. The three axes are independent reasons to split: it's logically complex
+# (many branches), it's simply too long, or it's deeply nested. A 12-line straight-line
+# function trips none of these; a 10-line 4-deep one trips nesting. Tuned on demo_repo + eval.
+_MIN_CYCLOMATIC = 6   # radon cyclomatic complexity (radon grades >10 as concerning)
+_MIN_LENGTH = 30      # raw line span — long even if linear
+_MIN_NESTING = 4      # control-flow nesting depth
 
 _SYSTEM = (
     "You are a precise Python refactoring engine. You split a long function into smaller, "
@@ -66,6 +82,11 @@ def llm_plan(
     if not client.available():
         return base
 
+    # Semantic codebase index: gives the decompose prompt real neighbor context (the function's
+    # semantic peers), instead of judging each function blind. Best-effort — no-op offline.
+    cb_vectors = codebase_vector_index(dm.storage, embed_provider=dm.embed)
+    build_codebase_index(graph, root, cb_vectors, embed_provider=dm.embed)
+
     order, _ = topo_order(graph)
     pos = {q: i for i, q in enumerate(order)}
     extra: list[PlanItem] = []
@@ -73,7 +94,8 @@ def llm_plan(
     for qual, source in _god_functions(graph, root):
         pattern = _shape_pattern(source)
         prior = dm.recall(source, pattern)
-        prompt = _decompose_prompt(source, prior)
+        neighbors = _neighbor_context(qual, graph, cb_vectors, dm)
+        prompt = _decompose_prompt(source, prior, neighbors)
         resp = client.complete_json(_SYSTEM, prompt)
         if not resp or not resp.get("new_source"):
             continue
@@ -124,10 +146,31 @@ def _god_functions(graph: Graph, root: str) -> list[tuple[str, str]]:
             node = nodes.get(s.name)
             if node is None:
                 continue
-            size = node.end_point[0] - node.start_point[0] + 1
-            if size >= _MIN_GOD_LINES:
-                out.append((q, function_text(node, source)))
+            text = function_text(node, source)
+            if _is_god_function(node, text):
+                out.append((q, text))
     return out
+
+
+def _is_god_function(node, text: str) -> bool:
+    """True if a function hits any god-function shape: complex, long, or deeply nested."""
+    length = node.end_point[0] - node.start_point[0] + 1
+    if length >= _MIN_LENGTH:
+        return True
+    if max_nesting_depth(node) >= _MIN_NESTING:
+        return True
+    return _cyclomatic_complexity(text) >= _MIN_CYCLOMATIC
+
+
+def _cyclomatic_complexity(source: str) -> int:
+    """Max radon cyclomatic complexity among blocks in *source* (0 if unparseable)."""
+    try:
+        from radon.complexity import cc_visit
+
+        blocks = cc_visit(source)
+        return max((b.complexity for b in blocks), default=0)
+    except Exception:
+        return 0
 
 
 def _shape_pattern(source: str) -> str:
@@ -145,7 +188,39 @@ def _shape_pattern(source: str) -> str:
     return f"decompose:{digest}"
 
 
-def _decompose_prompt(source: str, prior: Optional[RefactorDecision]) -> str:
+def _neighbor_context(qual, graph, cb_vectors, dm) -> str:
+    """A short block naming the function's nearest semantic peers (and how any were
+    decomposed before), so the LLM can match existing naming/structure conventions."""
+    if not dm.semantic:
+        return ""
+    hits = similar_symbols(qual, graph, cb_vectors, embed_provider=dm.embed, k=3, threshold=0.5)
+    lines: list[str] = []
+    for n in hits:
+        name = n.meta.get("qualname", n.key)
+        prior = dm.agent.get_decision(_shape_pattern_for(graph, n.meta.get("qualname")))
+        helpers = prior.choice.get("helper_names") if prior else None
+        if helpers:
+            lines.append(f"- {name} (similar; previously split into: {', '.join(helpers)})")
+        else:
+            lines.append(f"- {name} (similar)")
+    if not lines:
+        return ""
+    return "\n\nSemantically similar functions in this codebase:\n" + "\n".join(lines)
+
+
+def _shape_pattern_for(graph, qualname: Optional[str]) -> str:
+    """Recompute the decision key for a neighbor symbol (or a sentinel that never matches)."""
+    if not qualname or qualname not in graph.symbols:
+        return "decompose:__none__"
+    from refactorika.memory.codebase_index import _source_of
+
+    src = _source_of(graph).get(qualname)
+    return _shape_pattern(src) if src else "decompose:__none__"
+
+
+def _decompose_prompt(
+    source: str, prior: Optional[RefactorDecision], neighbors: str = ""
+) -> str:
     consistency = ""
     if prior and prior.choice.get("helper_names"):
         names = ", ".join(prior.choice["helper_names"])
@@ -160,5 +235,5 @@ def _decompose_prompt(source: str, prior: Optional[RefactorDecision]) -> str:
         '"new_source" (the full replacement source: the helper functions followed by the '
         'slimmed original function, which must keep its original name and signature), '
         '"helper_names" (list of the new helper function names), and "rationale" (one line).'
-        f"{consistency}\n\n```python\n{source}\n```"
+        f"{consistency}{neighbors}\n\n```python\n{source}\n```"
     )
