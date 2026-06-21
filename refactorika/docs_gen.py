@@ -7,14 +7,12 @@ from pathlib import Path
 from refactorika.analysis.parser import (
     get_tree,
     iter_functions,
-    iter_imports,
     iter_symbols,
 )
 from refactorika.core.schema import ExportRef, ModuleContext
 from refactorika.core.storage import Storage
 from refactorika.memory.agent_memory import AgentMemory
 from refactorika.memory.context import ContextRetriever
-
 
 # Patterns that flag non-obvious lines.
 _FLAG_PATTERNS = [
@@ -185,7 +183,7 @@ def _upsert_module_vector(
             return
         summary = f"{ctx.purpose_hint} {' '.join(e.name for e in ctx.exports)}"
         vec = embeddings.embed_one(summary)
-        vi.upsert(f"module:{module}", vec, {"module": module})
+        vi.upsert(f"module:{module}", vec, {"module": module}, text=summary)
     except Exception:
         pass
 

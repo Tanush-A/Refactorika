@@ -276,7 +276,7 @@ def embed_one(text: str) -> list[float]: ...
 def available() -> bool: ...   # False if neither provider importable
 ```
 
-- **Primary:** OpenAI `text-embedding-3-small` (1536-dim) when `OPENAI_API_KEY` is set. Provider selected by env: `REFACTORIKA_EMBED=openai|local` (default `openai` if a key is present, else `local`).
+- **Primary (built):** OpenAI `text-embedding-3-small` (1536-dim) — used whenever `OPENAI_API_KEY` is set, unless `REFACTORIKA_EMBED=local` forces the keyless path. `provider_dim()` returns the intended `(provider, dim)` without a network call so the index can name itself first.
 - **Keyless fallback:** `sentence-transformers` `all-MiniLM-L6-v2` (384-dim), offline. Lazy-import inside the function so importing the module never pulls torch.
 - **Packaging:** the deps (`openai`, `sentence-transformers`/torch, `redisvl`) live behind the **`refactorika[semantic]` optional extra**. Without it, `available()` is `False`, duplicate detection runs structural-only, and tools degrade gracefully (never crash on a missing import).
 - **Dimension** is provider-dependent — store it alongside vectors so a provider switch invalidates cleanly (namespace the hybrid index by `{provider}:{dim}`).
@@ -291,12 +291,13 @@ Per `05-redis-iris.md`: **four cooperating components**, Redis primary, local fa
 ### 7.1 AST-keyed cache (shipped — `core/storage.py`)
 Redis hash `refactorika:cache`, keyed on normalized AST signature. **Exact key, never fuzzy.** Used by `analyze_file`, tier-1 fingerprints, ruff baselines.
 
-### 7.2 Hybrid search index (`memory/vector_index.py`) — build, via **RedisVL**
-- **Backend:** a RedisVL `SearchIndex` (Redis 8.4+ Query Engine — Redis Cloud / Redis Stack). Index `refactorika:vec:{provider}:{dim}`; each doc = `{file}:{fn}` with fields: `embedding` (vector, HNSW, cosine, `dims`), `body` (text, BM25STD), and `file`/`module`/`fingerprint` (tags).
-- **API:** `upsert(key, vector, text, meta)` · `query_hybrid(vector, text, k=5, filters=None) -> [Neighbor{key,score,meta}]` (runs `HybridQuery`, RRF fusion) · `drop()`. A vector-only `query(...)` stays for callers that don't have query text.
+### 7.2 Hybrid search index (`memory/vector_index.py`) — **BUILT**, via RedisVL
+- **Backend:** a RedisVL `SearchIndex` (Redis 8.4+ Query Engine — Redis Cloud / Redis Stack). Index `refactorika:vec:{provider}:{dim}` (provider/dim from `embeddings.provider_dim()`, computed *before* the first embed). Each doc = `{file}:{fn}` with fields: `embedding` (vector, HNSW, cosine, `dims`), `body` (text, BM25STD), `line` (numeric), and `file`/`module`/`name`/`fingerprint` (tags).
+- **API (as built):** `upsert(key, vector, meta=None, *, text="")` — `meta` stays 3rd-positional for back-compat, `text` keyword-only · `query(vector, k=5, threshold=0.0)` vector-only (unchanged) · `query_hybrid(vector, text, k=5, filters=None) -> [Neighbor{key,score,meta}]` (`HybridQuery`, RRF, BM25STD) · `module_filter(m) -> FilterExpression|None` · `drop()`.
+- **Similarity reporting:** RRF scores aren't cosine, so `find_duplicates` recomputes true cosine between the two known function vectors for `DuplicatePair.similarity` and the `threshold` gate (stable across hybrid/fallback). `query_hybrid` itself takes no threshold.
 - **Why hybrid:** pure cosine is weak on code (misses exact identifiers, false-positives on unrelated helpers). `FT.HYBRID` fuses BM25 (identifiers/body) with vector (meaning) — Redis reports 3–3.5× recall, +11–15% accuracy vs. single-mode. RRF default; linear+alpha only if one signal should dominate.
-- **Fallback:** when no Query Engine is reachable (bare `redis-server` or offline), persist `{key:{vector,text,meta}}` to `.refactorika/state.json` and brute-force numpy cosine — vector-only (no BM25), same correctness floor. (Detect via RedisVL connection / `FT._LIST`; on error use JSON.)
-- **Deps:** `redisvl` (+ `redis-py` ≥ 7.1) in the `[semantic]` extra.
+- **Fallback:** when `storage._redis is None` or redisvl is absent (`_use_redisvl=False`), `query_hybrid` **delegates to vector-only `query()`** and entries persist as `{key:{vector,text,meta}}` in `.refactorika/state.json` with brute-force numpy cosine — same correctness floor, BM25 dropped.
+- **Deps:** `redisvl>=0.13` (+ `redis-py` ≥ 7.1, satisfied) in the `[semantic]` extra.
 
 ### 7.3 Agent memory (`memory/agent_memory.py`) — build, **cross-session**
 - **Stores:** per-module context (`ModuleContext` from `generate_docs`), architectural decisions, and refactor history (the `EditRecord` stream — generalizes the existing `refactorika:log`).

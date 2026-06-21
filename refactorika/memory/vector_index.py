@@ -1,21 +1,29 @@
-"""Vector index backed by RediSearch HNSW or brute-force JSON fallback.
+"""Vector index backed by RedisVL hybrid search or brute-force JSON fallback.
 
 Index name pattern: refactorika:vec:{provider}:{dim}
 
-Each document key has the form "{file}:{fn}" and stores:
-  - embedding (FLOAT32 binary blob in Redis; list in JSON)
-  - file, name, line (metadata)
+Primary backend: RedisVL (`SearchIndex`) over a Redis hash, supporting both
+vector-only (`VectorQuery`) and hybrid BM25 + vector (`HybridQuery`) search.
 
-Fallback (always works): vectors stored under the "vectors" key in the
-storage JSON state file and queried with brute-force cosine similarity.
+Fallback (always works, fully offline): vectors stored via the storage
+`vector_*` helpers and queried with brute-force numpy cosine similarity. The
+fallback drops BM25 — hybrid queries degrade to vector-only.
+
+All redisvl imports are lazy/guarded so importing this module never fails when
+redisvl (or a live Redis) is absent.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 if TYPE_CHECKING:
+    from redisvl.query.filter import FilterExpression
+
     from refactorika.core.storage import Storage
 
 
@@ -42,181 +50,248 @@ def _cosine(a: list[float], b: list[float]) -> float:
         return dot / (norm_a * norm_b + 1e-9)
 
 
-def _current_index_name() -> str:
-    """Return the RediSearch index name based on current embedding provider/dim."""
-    try:
-        from refactorika.analysis import embeddings
-
-        provider = embeddings._PROVIDER if embeddings._PROVIDER != "none" else "local"
-        dim = embeddings._DIM if embeddings._DIM else 384
-    except Exception:
-        provider = "local"
-        dim = 384
-    return f"refactorika:vec:{provider}:{dim}"
-
-
-def _current_dim() -> int:
-    try:
-        from refactorika.analysis import embeddings
-
-        return embeddings._DIM if embeddings._DIM else 384
-    except Exception:
-        return 384
+_RETURN_FIELDS = ["file", "module", "name", "line", "fingerprint"]
 
 
 class VectorIndex:
-    """Vector similarity index with RediSearch HNSW or JSON brute-force fallback."""
+    """Vector similarity index with RedisVL hybrid search or JSON brute-force fallback."""
 
     def __init__(self, storage: "Storage") -> None:
         self._storage = storage
-        self._redis_client = storage._redis  # may be None
-        self._use_redis = False
-        self._index_name: str = _current_index_name()
 
-        if self._redis_client is not None:
-            self._use_redis = self._ensure_redis_index()
-
-    # ------------------------------------------------------------------
-    # Redis backend helpers
-    # ------------------------------------------------------------------
-
-    def _ensure_redis_index(self) -> bool:
-        """Try to create or verify the RediSearch vector index. Returns True on success."""
+        # CONTRACT: provider_dim() -> (str, int). Default defensively if missing.
         try:
-            from redis.commands.search.field import VectorField, TextField, NumericField
-            from redis.commands.search.indexDefinition import IndexDefinition, IndexType
-        except ImportError:
+            from refactorika.analysis.embeddings import provider_dim
+
+            provider, dim = provider_dim()
+        except Exception:
+            provider, dim = ("none", 0)
+        self._provider = provider
+        self._dim = int(dim)
+        self._index_name = f"refactorika:vec:{provider}:{dim}"
+
+        self._index = None
+        self._use_redisvl = self._ensure_index()
+
+    # ------------------------------------------------------------------
+    # Index setup
+    # ------------------------------------------------------------------
+
+    def _ensure_index(self) -> bool:
+        """Create/verify the RedisVL index. Returns False (fallback) on any problem."""
+        if self._storage._redis is None:
+            return False
+        try:
+            from redisvl.index import SearchIndex
+        except Exception:
             return False
 
         try:
-            dim = _current_dim()
-            index_name = _current_index_name()
-            self._index_name = index_name
-
-            try:
-                self._redis_client.ft(index_name).info()
-                return True  # index already exists
-            except Exception:
-                pass  # need to create it
-
-            schema = (
-                VectorField(
-                    "embedding",
-                    "HNSW",
+            schema = {
+                "index": {
+                    "name": self._index_name,
+                    "prefix": f"{self._index_name}:doc",
+                    "storage_type": "hash",
+                },
+                "fields": [
                     {
-                        "TYPE": "FLOAT32",
-                        "DIM": dim,
-                        "DISTANCE_METRIC": "COSINE",
+                        "name": "embedding",
+                        "type": "vector",
+                        "attrs": {
+                            "dims": self._dim,
+                            "distance_metric": "cosine",
+                            "algorithm": "hnsw",
+                            "datatype": "float32",
+                        },
                     },
-                ),
-                TextField("file"),
-                TextField("name"),
-                NumericField("line"),
+                    {"name": "body", "type": "text"},
+                    {"name": "file", "type": "tag"},
+                    {"name": "module", "type": "tag"},
+                    {"name": "name", "type": "tag"},
+                    {"name": "fingerprint", "type": "tag"},
+                    {"name": "line", "type": "numeric"},
+                ],
+            }
+            index = SearchIndex.from_dict(
+                schema, redis_url=os.environ.get("REDIS_URL")
             )
-            definition = IndexDefinition(
-                prefix=[f"{index_name}:doc:"],
-                index_type=IndexType.HASH,
-            )
-            self._redis_client.ft(index_name).create_index(schema, definition=definition)
+            index.create(overwrite=False)
+            self._index = index
             return True
         except Exception:
             return False
 
-    def _redis_doc_key(self, key: str) -> str:
+    def _doc_id(self, key: str) -> str:
         return f"{self._index_name}:doc:{key}"
 
-    # ------------------------------------------------------------------
-    # JSON fallback helpers
-    # ------------------------------------------------------------------
+    def _strip_prefix(self, doc_id: str) -> str:
+        prefix = f"{self._index_name}:doc:"
+        return doc_id.replace(prefix, "", 1) if doc_id.startswith(prefix) else doc_id
 
-    def _json_read(self) -> dict:
-        """Read the full JSON state dict from storage."""
-        data = self._storage._read_json()
-        if "vectors" not in data:
-            data["vectors"] = {}
-        return data
-
-    def _json_write(self, data: dict) -> None:
-        """Write the full JSON state dict back to storage."""
-        self._storage._write_json(data)
+    @staticmethod
+    def _doc_meta(doc: dict) -> dict:
+        return {
+            "file": doc.get("file", ""),
+            "module": doc.get("module", ""),
+            "name": doc.get("name", ""),
+            "line": int(doc.get("line", 0) or 0),
+            "fingerprint": doc.get("fingerprint", ""),
+        }
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def upsert(self, key: str, vector: list[float], meta: dict) -> None:
-        """Store or update a vector with associated metadata."""
-        if self._use_redis:
+    def upsert(
+        self,
+        key: str,
+        vector: list[float],
+        meta: dict | None = None,
+        *,
+        text: str = "",
+    ) -> None:
+        """Store or update a vector with metadata (`meta`) and optional `text` body."""
+        meta = meta or {}
+        if self._use_redisvl:
             try:
-                import struct
-
-                blob = struct.pack(f"{len(vector)}f", *vector)
-                mapping: dict = {
-                    "embedding": blob,
-                    "file": meta.get("file", ""),
-                    "name": meta.get("name", ""),
-                    "line": meta.get("line", 0),
-                }
-                self._redis_client.hset(self._redis_doc_key(key), mapping=mapping)
+                self._index.load(
+                    [
+                        {
+                            "embedding": np.array(
+                                vector, dtype=np.float32
+                            ).tobytes(),
+                            "body": text,
+                            "file": meta.get("file", ""),
+                            "module": meta.get("module", ""),
+                            "name": meta.get("name", ""),
+                            "fingerprint": meta.get("fingerprint", ""),
+                            "line": int(meta.get("line", 0) or 0),
+                        }
+                    ],
+                    keys=[self._doc_id(key)],
+                )
                 return
             except Exception:
-                self._use_redis = False  # fall through to JSON
+                self._use_redisvl = False  # fall through to JSON
 
-        data = self._json_read()
-        data["vectors"][key] = {"vector": vector, "meta": meta}
-        self._json_write(data)
+        self._storage.vector_upsert(
+            key, {"vector": vector, "text": text, "meta": meta}
+        )
 
     def query(
         self, vector: list[float], k: int = 5, threshold: float = 0.0
     ) -> list[Neighbor]:
         """Return up to k nearest neighbors with score >= threshold, sorted descending."""
-        if self._use_redis:
+        if self._use_redisvl:
             try:
-                return self._redis_query(vector, k, threshold)
+                return self._redisvl_query(vector, k, threshold)
             except Exception:
-                self._use_redis = False
+                self._use_redisvl = False
 
         return self._json_query(vector, k, threshold)
 
-    def _redis_query(
+    def query_hybrid(
+        self,
+        vector: list[float],
+        text: str,
+        k: int = 5,
+        filters: "FilterExpression | None" = None,
+    ) -> list[Neighbor]:
+        """Hybrid BM25 + vector search. Offline fallback drops BM25 → vector-only."""
+        if not self._use_redisvl:
+            return self.query(vector, k, threshold=0.0)
+
+        try:
+            from redisvl.query import HybridQuery
+
+            hq = HybridQuery(
+                text=text,
+                text_field_name="body",
+                vector=vector,
+                vector_field_name="embedding",
+                combination_method="RRF",
+                text_scorer="BM25STD",
+                filter_expression=filters,
+                num_results=k,
+                return_fields=_RETURN_FIELDS,
+                yield_combined_score_as="hybrid_score",
+            )
+            docs = self._index.query(hq)
+            neighbors: list[Neighbor] = []
+            for doc in docs:
+                score = float(
+                    doc.get("hybrid_score", doc.get("vector_distance", 0)) or 0
+                )
+                neighbors.append(
+                    Neighbor(
+                        key=self._strip_prefix(doc.get("id", "")),
+                        score=score,
+                        meta=self._doc_meta(doc),
+                    )
+                )
+            return neighbors
+        except Exception:
+            self._use_redisvl = False
+            return self.query(vector, k, threshold=0.0)
+
+    def module_filter(self, module: str) -> "FilterExpression | None":
+        """Build a module tag filter (or None when redisvl is unavailable)."""
+        try:
+            from redisvl.query.filter import Tag
+
+            return Tag("module") == module
+        except Exception:
+            return None
+
+    def drop(self) -> None:
+        """Remove all vectors from the index."""
+        if self._use_redisvl:
+            try:
+                self._index.delete(drop=True)
+            except Exception:
+                pass
+            self._use_redisvl = False
+            return
+
+        self._storage.vector_delete_all()
+
+    # ------------------------------------------------------------------
+    # Backend query helpers
+    # ------------------------------------------------------------------
+
+    def _redisvl_query(
         self, vector: list[float], k: int, threshold: float
     ) -> list[Neighbor]:
-        import struct
-        from redis.commands.search.query import Query
+        from redisvl.query import VectorQuery
 
-        blob = struct.pack(f"{len(vector)}f", *vector)
-        q = (
-            Query(f"*=>[KNN {k} @embedding $vec AS score]")
-            .sort_by("score")
-            .paging(0, k)
-            .dialect(2)
+        vq = VectorQuery(
+            vector=vector,
+            vector_field_name="embedding",
+            num_results=k,
+            return_fields=_RETURN_FIELDS,
+            return_score=True,
         )
-        results = self._redis_client.ft(self._index_name).search(
-            q, query_params={"vec": blob}
-        )
+        docs = self._index.query(vq)
         neighbors: list[Neighbor] = []
-        for doc in results.docs:
-            # RediSearch returns COSINE distance (0=identical, 2=opposite).
-            # Convert to similarity: similarity = 1 - distance.
-            distance = float(getattr(doc, "score", 1.0))
+        for doc in docs:
+            # RedisVL returns cosine distance (0=identical). similarity = 1 - distance.
+            distance = float(doc.get("vector_distance", 1.0) or 1.0)
             similarity = 1.0 - distance
             if similarity >= threshold:
-                key = doc.id.replace(f"{self._index_name}:doc:", "", 1)
-                meta = {
-                    "file": getattr(doc, "file", ""),
-                    "name": getattr(doc, "name", ""),
-                    "line": int(getattr(doc, "line", 0)),
-                }
-                neighbors.append(Neighbor(key=key, score=similarity, meta=meta))
-
+                neighbors.append(
+                    Neighbor(
+                        key=self._strip_prefix(doc.get("id", "")),
+                        score=similarity,
+                        meta=self._doc_meta(doc),
+                    )
+                )
         neighbors.sort(key=lambda n: n.score, reverse=True)
         return neighbors
 
     def _json_query(
         self, vector: list[float], k: int, threshold: float
     ) -> list[Neighbor]:
-        data = self._json_read()
-        vectors_store: dict = data.get("vectors", {})
+        vectors_store = self._storage.vector_get_all()
 
         scored: list[Neighbor] = []
         for key, entry in vectors_store.items():
@@ -225,21 +300,9 @@ class VectorIndex:
                 continue
             score = _cosine(vector, stored_vec)
             if score >= threshold:
-                scored.append(Neighbor(key=key, score=score, meta=entry.get("meta", {})))
+                scored.append(
+                    Neighbor(key=key, score=score, meta=entry.get("meta", {}))
+                )
 
         scored.sort(key=lambda n: n.score, reverse=True)
         return scored[:k]
-
-    def drop(self) -> None:
-        """Remove all vectors from the index."""
-        if self._use_redis:
-            try:
-                self._redis_client.ft(self._index_name).dropindex(delete_documents=True)
-                self._use_redis = False
-                return
-            except Exception:
-                pass
-
-        data = self._json_read()
-        data["vectors"] = {}
-        self._json_write(data)
