@@ -24,56 +24,67 @@ Everything is one of two classes: **advisory** (read-only — finds and explains
 
 ## 0.1 Architecture at a glance
 
-```
-        ┌──────────────────────────────────────────────────────────────────────┐
-        │                       CLAUDE  (reasoning agent)                        │
-        │     reads results · decides what to change · proposes file contents     │
-        └───────▲───────────────────────────────────────────────────┬──────────┘
-   advisory     │ results (ranked smells, dup pairs, dead symbols,    │ tool calls
-   feeds        │          context)                                   │ (MCP / stdio)
-   reasoning    │                                                     ▼
-        ┌───────┴─────────────────────────────────────────────────────────────────┐
-        │                  MCP SHELL  ·  refactorika/mcp_server.py                  │
-        │   FastMCP — thin 1:1 wrappers, JSON in/out                                │
-        │                                                                           │
-        │   ADVISORY (read-only)                       VERIFIED MUTATION (gated)     │
-        │   analyze_file   find_duplicates             apply_and_verify              │
-        │   find_dead_code get_context_map  get_log    apply_and_verify_multi        │
-        └───────┬───────────────────────────────────────────────┬──────────────────┘
-                │                                                │
-                ▼                                                ▼
-   ┌──────────────────────────────────────┐   ┌───────────────────────────────────────┐
-   │   ANALYSIS  (read-only, refactorika/  │   │   GATE STACK   core/apply.py + gates.py │
-   │   analysis/ + core/analyze.py)        │   │   atomic: snapshot → … → commit/rollback│
-   │                                       │   │                                         │
-   │  parser.py     shared tree-sitter     │   │   1 parse    (tree-sitter)              │
-   │  analyze.py    smells + ranking       │   │   2 lint     (ruff, new-violations)     │
-   │  duplicates.py fingerprint + semantic │   │   3 type     (pyright)                  │
-   │  call_graph.py symbol graph           │   │   4 behavior (pytest)  ◄── proves safe  │
-   │  dead_code.py  reachability + conf.   │   │   → git commit  /  restore + reason     │
-   │  embeddings.py [semantic] extra       │   │   → EditRecord {checks, status, files…} │
-   │  docs_gen.py   context extraction     │   └─────────────────┬───────────────────────┘
-   └──────────────────┬───────────────────┘                     │ write history
-                      │ read/write                              │
-                      ▼                                          ▼
-   ┌───────────────────────────────────────────────────────────────────────────────────┐
-   │                    REDIS IRIS  (memory)   ·   core/storage.py + memory/             │
-   │                                                                                     │
-   │   ① AST cache        ② Vector index       ③ Agent memory      ④ Context retriever   │
-   │   (skip re-parse)    {file}:{fn}→vec       cross-session       structured + vector   │
-   │   exact-key hash     cosine / RediSearch   ctx + history       relevant prior ctx    │
-   │   storage.cache_*    memory/vector_index   memory/agent_memory memory/context        │
-   │                                                                                     │
-   │   ────────────────── local fallback (offline, mandatory) ──────────────────────     │
-   │        .refactorika/state.json   ·   .refactorika/context/<module>.md               │
-   └───────────────────────────────────────────────────────────────────────────────────┘
+Four layers, top to bottom. Claude sits on top and talks only to the MCP server; everything below is the harness.
 
-   Loop:  analyze/find_* ──▶ Claude proposes ──▶ apply_and_verify ──▶ commit │ rollback+reason
-                ▲                                                                  │
-                └───────────────── re-propose on rollback ◄────────────────────────┘
+```
+ ┌───────────────────────────────────────────────────────────────┐
+ │  CLAUDE  — the reasoning agent (outside the harness)          │
+ │  decides WHAT to change · writes the new code                 │
+ └───────────────────────────────────────────────────────────────┘
+        │ calls a tool                      ▲ gets a result back
+        ▼                                   │
+ ┌───────────────────────────────────────────────────────────────┐
+ │  MCP SERVER   (mcp_server.py)  — the only thing Claude talks to│
+ │                                                               │
+ │   ADVISORY  (look, don't touch)                               │
+ │     analyze_file · find_duplicates · find_dead_code           │
+ │     generate_docs · get_context_map · get_log                 │
+ │                                                               │
+ │   MUTATION  (change code — but only if it passes)             │
+ │     apply_and_verify · apply_and_verify_multi                 │
+ └───────────────────────────────────────────────────────────────┘
+        │                                   │
+   advisory tools                      mutation tools
+   go here                             go here
+        ▼                                   ▼
+ ┌─────────────────────────┐   ┌─────────────────────────────────┐
+ │  ANALYSIS  (read-only)  │   │  GATE STACK  (atomic: all-or-    │
+ │  reads code, finds      │   │  nothing — never leaves a mess)  │
+ │  problems:              │   │                                 │
+ │                         │   │   1. parse   (tree-sitter)      │
+ │   • smells / ranking    │   │   2. lint    (ruff)             │
+ │   • duplicates          │   │   3. types   (pyright)          │
+ │   • dead code           │   │   4. tests   (pytest) ← the     │
+ │   • context for docs    │   │                proof it's safe  │
+ │                         │   │   ──────────────────────────    │
+ │                         │   │   all pass → git commit         │
+ │                         │   │   any fail → undo + say why     │
+ └─────────────────────────┘   └─────────────────────────────────┘
+        │                                   │
+        └─────────────────┬─────────────────┘
+                          ▼
+ ┌───────────────────────────────────────────────────────────────┐
+ │  REDIS IRIS  — memory, shared by both sides                   │
+ │                                                               │
+ │   1. AST cache       don't re-analyze unchanged code          │
+ │   2. Vector index    find look-alike functions                │
+ │   3. Agent memory    remember context across sessions         │
+ │   4. Context fetch   pull the relevant past notes             │
+ │                                                               │
+ │   no Redis running?  →  falls back to .refactorika/ files.    │
+ │   always works offline.                                       │
+ └───────────────────────────────────────────────────────────────┘
 ```
 
-**Read it as three bands.** The MCP shell exposes two tool classes; **advisory** tools run through the read-only **analysis** layer, **mutations** run through the atomic **gate stack**. Both sit on **Redis Iris**, which is primary but always degrades to local files so the harness runs offline. Claude is outside the harness — it consumes advisory results and proposes the edits the gate stack then proves.
+**The loop, in plain steps:**
+
+1. Claude calls an **advisory** tool → the **analysis** layer reads the code and hands back a ranked list of problems (smells, duplicate pairs, dead symbols, context).
+2. Claude reads that and **proposes** a concrete edit — it writes the new file contents.
+3. Claude calls a **mutation** tool → the **gate stack** runs parse → lint → types → tests.
+4. **All green → commit.** **Any red → undo the change and return the reason.**
+5. On a failure, Claude reads the reason and **re-proposes** — back to step 2.
+
+**Redis Iris** sits under both sides as shared memory (so re-runs are faster and context survives across sessions), but it's never required — if Redis isn't running, everything degrades to local files and still works offline.
 
 ---
 
