@@ -15,10 +15,10 @@ venv/
 # Demo fixture's own git
 demo_repo/.git/
 
-# Eval: benchmark data + run artifacts (fetched/generated, never committed)
+# Fetched benchmark repos (mixed/GPL licenses, ~53MB) — never committed.
 eval/external/
-eval/results/
 eval/.venv/
+# eval/results/ IS committed: it's our reported numbers (JSON + markdown tables).
 
 # OS / editor
 .DS_Store

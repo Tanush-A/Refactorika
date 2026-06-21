@@ -22,5 +22,17 @@ def _offline_embeddings(monkeypatch: pytest.MonkeyPatch, request: pytest.Fixture
     if request.node.get_closest_marker("real_embeddings"):
         return  # opted into the real provider
     import refactorika.analysis.embeddings as emb
+    from refactorika.llm import providers as prov
 
     monkeypatch.setattr(emb, "available", lambda: False)
+    # The provider path (not the module fn above) is what DecisionMemory and the codebase index
+    # actually consult. With the optional [semantic] extra installed these would otherwise go
+    # live and make the suite non-deterministic (real embeddings change LLM prompts / recall).
+    # Force every concrete provider unavailable so semantic recall stays off by default; tests
+    # that want it inject their own provider (a separate subclass, unaffected by these patches).
+    for cls in (
+        prov.LocalEmbeddingProvider,
+        prov.OllamaEmbeddingProvider,
+        prov.OpenAIEmbeddingProvider,
+    ):
+        monkeypatch.setattr(cls, "available", lambda self: False)

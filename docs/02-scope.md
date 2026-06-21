@@ -1,14 +1,14 @@
 # Scope
 
-Refactorika targets **small-to-medium Python codebases** — single-package projects and small multi-file/multi-package repos where structure is shallow enough to reason about with static analysis. The product is one coherent harness; the capabilities below ship as one system, sequenced by the build order at the bottom.
+Refactorika targets **small-to-medium Python codebases** — single-package projects and small multi-file/multi-package repos where structure is shallow enough to reason about with static analysis. The product is one coherent engine; the capabilities below run as one pipeline (plan → deterministic transform → verify → commit).
 
 ## The non-negotiable invariant
 
-**A refactor changes shape, not behavior.** Every *mutating* action is proven behavior-preserving by the gate stack (`parse → ruff → pyright → pytest`) before it commits, and rolled back atomically on any failure. This is the whole trust angle — it holds for every kind of edit, including duplicate consolidation and dead-code removal.
+**A refactor changes shape, not behavior.** Every edit is proven behavior-preserving by the gate stack (`parse → ruff → pyright → pytest`, tests impact-scoped, full suite at baseline + finale) before it commits, and reverted byte-for-byte on any failure. This is the whole trust angle — it holds for every kind of edit, including dead-code removal and decomposition.
 
 ## In Scope
 
-Two classes of capability work together: **advisory** tools that find and explain (read-only), and **verified mutations** that fix (gated). Advisory tools surface opportunities → Claude proposes a concrete edit → the mutation entrypoint proves it safe and commits.
+The engine **plans** the work from the program graph and applies it with **deterministic transform engines** (rope/LibCST/ruff); the **LLM supplies judgment only** (which god function to split, how to name pieces) and emits specs, not diffs. Everything below lands only if the verification gate passes.
 
 **Organization (verified mutation)**
 - Split large files into logically grouped modules.

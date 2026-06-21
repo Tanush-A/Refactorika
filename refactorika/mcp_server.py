@@ -4,22 +4,22 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
-from .analysis.audit import audit_repo as _audit_repo
-from .analysis.audit import build_plan as _build_plan
+from .agents.orchestrator import run_campaign as _run_campaign
 from .analysis.dead_code import find_dead_code as _find_dead_code
 from .analysis.duplicates import find_duplicates as _find_duplicates
-from .analysis.related import find_related as _find_related
 from .core.analyze import analyze_file as _analyze_file
 from .core.apply import apply_and_verify as _apply_and_verify
 from .core.apply import apply_and_verify_multi as _apply_and_verify_multi
-from .core.schema import Plan
 from .core.storage import Storage
 from .docs_gen import generate_docs as _generate_docs
 from .docs_gen import get_context_map as _get_context_map
+from .graph.order import reachable_from, topo_order
+from .graph.resolver import build_graph as _build_graph
 from .memory.agent_memory import AgentMemory
 from .memory.context import ContextRetriever
 from .memory.vector_index import VectorIndex
-from .observability import init_sentry, report_exceptions
+from .pipeline.orchestrator import run_pipeline as _run_pipeline
+from .pipeline.planner import deterministic_plan as _deterministic_plan
 
 mcp = FastMCP("refactorika")
 
@@ -30,15 +30,13 @@ _context_retriever = ContextRetriever(_storage, _agent_memory)
 
 
 @mcp.tool()
-@report_exceptions("mcp", "analyze_file")
 def analyze_file(path: str) -> dict:
     """Find ranked structural-refactor opportunities in a Python file (read-only)."""
     return _analyze_file(path, _storage).to_dict()
 
 
 @mcp.tool()
-@report_exceptions("mcp", "find_duplicates")
-def find_duplicates(path: str, threshold: float = 0.55) -> dict:
+def find_duplicates(path: str, threshold: float = 0.83) -> dict:
     """Detect duplicate functions in a file or directory (read-only).
 
     Tier 1 (structural): exact-shape clones via AST fingerprint.
@@ -49,21 +47,6 @@ def find_duplicates(path: str, threshold: float = 0.55) -> dict:
 
 
 @mcp.tool()
-@report_exceptions("mcp", "find_related")
-def find_related(path: str, symbol: str = "", k: int = 5) -> dict:
-    """Impact check: what else does changing this file affect? (read-only, advisory)
-
-    Returns (a) `related` — functions ELSEWHERE in the repo that are semantically
-    similar (hybrid vector search), i.e. parallel/duplicated logic a behavior
-    change here probably needs mirrored; and (b) `dependents` — modules that
-    directly import/call this one (call graph). Use before refactoring to avoid
-    fixing one copy and missing the others.
-    """
-    return _find_related(path, _storage, _vector_index, k=k, symbol=symbol)
-
-
-@mcp.tool()
-@report_exceptions("mcp", "find_dead_code")
 def find_dead_code(path: str) -> dict:
     """Detect unreachable symbols in a file or directory via call-graph reachability (read-only).
 
@@ -74,7 +57,6 @@ def find_dead_code(path: str) -> dict:
 
 
 @mcp.tool()
-@report_exceptions("mcp", "apply_and_verify")
 def apply_and_verify(path: str, new_content: str, refactor_kind: str) -> dict:
     """Apply Claude's proposed file contents, run the gate stack, commit or roll back atomically.
 
@@ -84,7 +66,6 @@ def apply_and_verify(path: str, new_content: str, refactor_kind: str) -> dict:
 
 
 @mcp.tool()
-@report_exceptions("mcp", "apply_and_verify_multi")
 def apply_and_verify_multi(edits: dict, refactor_kind: str) -> dict:
     """Multi-file atomic apply: snapshot all → gates → one commit or restore all.
 
@@ -96,7 +77,6 @@ def apply_and_verify_multi(edits: dict, refactor_kind: str) -> dict:
 
 
 @mcp.tool()
-@report_exceptions("mcp", "generate_docs")
 def generate_docs(path: str) -> dict:
     """Extract module context and persist to agent memory + .refactorika/context/<module>.md.
 
@@ -107,7 +87,6 @@ def generate_docs(path: str) -> dict:
 
 
 @mcp.tool()
-@report_exceptions("mcp", "get_context_map")
 def get_context_map(path: str) -> dict:
     """Return accumulated cross-session context for a module from agent memory (read-only).
 
@@ -117,75 +96,62 @@ def get_context_map(path: str) -> dict:
 
 
 @mcp.tool()
-@report_exceptions("mcp", "audit_repo")
-def audit_repo(path: str) -> dict:
-    """Ranked repo-wide structural-opportunity report across all files (read-only, advisory).
-
-    Aggregates per-file analysis into one report: which files, which smells, the
-    headline finding. The forest-level view a human acts on before a campaign.
-    """
-    return _audit_repo(path, _storage).to_dict()
-
-
-@mcp.tool()
-@report_exceptions("mcp", "get_plan")
-def get_plan(path: str) -> dict:
-    """Dependency-ordered refactor plan (fewest-dependents-first); persists it (advisory).
-
-    Orders deviating files low-blast-radius-first so later edits land on stable
-    ground. The plan is saved as the current plan for confirm_plan to gate.
-    """
-    return _build_plan(path, _storage).to_dict()
-
-
-@mcp.tool()
-@report_exceptions("mcp", "confirm_plan")
-def confirm_plan(decision: str = "approve", order: list[str] | None = None) -> dict:
-    """Human checkpoint: approve / reject / reorder the persisted plan. Never changes code.
-
-    decision='approve' green-lights execution; 'reject' stops it; 'reorder' (with
-    order=[file,...]) overrides the dependency heuristic. Returns the updated plan.
-    """
-    raw = _storage.load_plan()
-    if raw is None:
-        return {"error": "no plan to confirm; call get_plan first"}
-    plan = Plan.from_dict(raw)
-    if decision == "approve":
-        plan.confirmed, plan.decision = True, "approve"
-    elif decision == "reject":
-        plan.confirmed, plan.decision = False, "reject"
-    elif decision == "reorder" and order:
-        by_file = {t.file: t for t in plan.tasks}
-        plan.tasks = [by_file[f] for f in order if f in by_file]
-        for i, t in enumerate(plan.tasks):
-            t.order = i
-        plan.confirmed, plan.decision = True, "reorder"
-    _storage.save_plan(plan.to_dict())
-    return plan.to_dict()
-
-
-@mcp.tool()
-@report_exceptions("mcp", "run_agents")
-def run_agents(max_workers: int = 4) -> dict:
-    """Dispatch the confirmed plan to specialist agents in parallel; returns a run summary.
-
-    Requires get_plan + confirm_plan to have been called first.
-    Golden path: audit_repo → get_plan → confirm_plan → run_agents → get_log
-    """
-    from .agents.orchestrator import dispatch_plan  # noqa: PLC0415
-
-    return dispatch_plan(_storage, max_workers)
-
-
-@mcp.tool()
-@report_exceptions("mcp", "get_log")
 def get_log() -> list[dict]:
     """Return the append-only edit log (powers the dashboard)."""
     return _storage.get_log()
 
 
+# --- v3 pipeline surface (the primary, autonomous engine) ------------------------
+
+@mcp.tool()
+def build_graph(path: str) -> dict:
+    """Build the reference-correct symbol graph (read-only).
+
+    Returns symbols, leaf-to-root apply order, entry points, dead symbols, and cycles —
+    the whole-program model the pipeline plans on.
+    """
+    g = _build_graph(path)
+    order, cycles = topo_order(g)
+    reach = reachable_from(g, g.entry_points)
+    dead = sorted(q for q in g.symbols if q not in reach and g.symbols[q].kind != "module")
+    return {
+        "path": path,
+        "symbols": {q: s.to_dict() for q, s in g.symbols.items()},
+        "leaf_to_root": order,
+        "entry_points": sorted(g.entry_points),
+        "dead_symbols": dead,
+        "cycles": cycles,
+    }
+
+
+@mcp.tool()
+def get_plan(path: str) -> dict:
+    """Return the leaf-to-root worklist of transform specs the pipeline would run (read-only)."""
+    return _deterministic_plan(_build_graph(path)).to_dict()
+
+
+@mcp.tool()
+def run_pipeline(path: str, apply: bool = False) -> dict:
+    """Run the full verified refactor pipeline. Dry-run by default; apply=True commits.
+
+    Returns every edit record (committed/rolled-back), before/after metrics, and the
+    authoritative baseline + finale full-suite test results.
+    """
+    return _run_pipeline(path, apply=apply, storage=_storage).to_dict()
+
+
+@mcp.tool()
+def run_agents(path: str) -> dict:
+    """Run the agentic campaign: audit -> dependency-ordered plan -> specialist agents.
+
+    Each agent brings judgment; the deterministic transform engines + the verified Checker bring
+    correctness (impact-scoped gates, commit or revert per edit). Applies in place. Returns a
+    summary {committed, rolled_back, skipped, records, dominant_finding, tasks}.
+    """
+    return _run_campaign(path, _storage)
+
+
 def main() -> None:
-    init_sentry("mcp")
     mcp.run()
 
 
