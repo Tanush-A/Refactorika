@@ -82,6 +82,39 @@ def test_orchestrator_removes_dead_code_and_keeps_tests_green(tmp_path):
     assert "remove_dead_code" in kinds
 
 
+def test_rename_centerpiece_through_pipeline(tmp_path):
+    """The rename engine is reachable through the product and commits, updating call sites."""
+    from refactorika.pipeline.planner import renames_first_planner
+
+    repo = _git_repo(tmp_path, {
+        "util.py": "def helper(x):\n    return x + 1\n",
+        "app.py": "from util import helper\n\ndef run():\n    return helper(41)\n",
+        "test_app.py": "from app import run\n\ndef test_run():\n    assert run() == 42\n",
+    })
+    storage = Storage(redis_url=None, json_path=tmp_path / "s.json")
+    planner = renames_first_planner([("util.helper", "increment")])
+    res = run_pipeline(str(repo), apply=True, planner=planner, storage=storage)
+
+    renames = [r for r in res.records if r["refactor_kind"] == "rename"]
+    assert renames and renames[0]["status"] == "committed"
+    assert "def increment(" in (repo / "util.py").read_text()
+    assert "increment(41)" in (repo / "app.py").read_text()
+    assert res.finale_tests is True
+
+
+def test_typecheck_gate_only_rejects_new_errors(tmp_path):
+    """A pre-existing type error in a touched file must not fail an unrelated valid edit."""
+    from refactorika.core.gates import pyright_baseline, typecheck_gate
+
+    # An unresolved import is a pre-existing (environment) error.
+    f = tmp_path / "m.py"
+    f.write_text("import definitely_not_a_real_module\n\n\ndef f():\n    return 1\n")
+    base = pyright_baseline(f)
+    # Re-checking the same file (no new errors) must pass despite base > 0.
+    ok, _ = typecheck_gate(f, base)
+    assert ok is not False  # True or None(skipped if pyright absent), never False
+
+
 def test_demo_repo_deterministic_run_is_clean(tmp_path):
     """Guard the demo: dead-code removed root-to-leaf + cleanup, no reverts, finale green."""
     import shutil

@@ -16,6 +16,33 @@ from refactorika.graph.model import Graph
 from refactorika.graph.order import impact_of, reachable_from, topo_order
 
 
+def renames_first_planner(renames: list[tuple[str, str]], base=None):
+    """A planner that runs explicit reference-correct renames first, then the base plan.
+
+    Renames are deterministic and provably complete (rope updates every true reference), so
+    this is the safest, most demo-reliable way to surface the rename-propagation centerpiece.
+    Runs before other edits so later steps see the new names.
+    """
+    base = base or deterministic_plan
+
+    def _plan(graph: Graph, root: str | None = None) -> Worklist:
+        wl = base(graph, root)
+        items: list[PlanItem] = []
+        for i, (qual, new_name) in enumerate(renames):
+            if qual not in graph.symbols:
+                continue
+            items.append(PlanItem(
+                spec=TransformSpec(kind="rename", target=qual, params={"new_name": new_name},
+                                   rationale=f"rename {qual.split('.')[-1]} -> {new_name} "
+                                             "(updates every reference, repo-wide)"),
+                order_index=-1000 + i,  # renames go first
+                impact=sorted(impact_of(graph, qual)),
+            ))
+        return Worklist(items=items + wl.items, cycles=wl.cycles)
+
+    return _plan
+
+
 def deterministic_plan(graph: Graph, root: str | None = None) -> Worklist:
     """Mechanical, no-LLM plan: remove dead code + clean every module, leaf-to-root.
 

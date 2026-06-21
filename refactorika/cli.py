@@ -41,22 +41,36 @@ def _entry(
     show_plan: bool = typer.Option(False, "--show-plan", help="Print the plan and exit."),
     no_tests: bool = typer.Option(False, "--no-tests", help="Skip the test gates (faster)."),
     use_llm: bool = typer.Option(False, "--llm", help="Use the LLM planner (needs API key)."),
+    rename: list[str] = typer.Option(
+        None, "--rename",
+        help="Reference-correct rename, repeatable: 'module.qualname=new_name'."),
 ) -> None:
     """Refactor a Python repo with verified, graph-driven transforms."""
+    renames = _parse_renames(rename)
     if show_graph:
         _print_graph(path)
         return
     if show_plan:
-        _print_plan(path, use_llm)
+        _print_plan(path, use_llm, renames)
         return
-    _run(path, apply=apply, run_tests=not no_tests, use_llm=use_llm)
+    _run(path, apply=apply, run_tests=not no_tests, use_llm=use_llm, renames=renames)
+
+
+def _parse_renames(rename: Optional[list[str]]) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for r in rename or []:
+        if "=" in r:
+            qual, new = r.split("=", 1)
+            pairs.append((qual.strip(), new.strip()))
+    return pairs
 
 
 # --------------------------------------------------------------------------- actions
-def _run(path: str, *, apply: bool, run_tests: bool, use_llm: bool) -> None:
+def _run(path: str, *, apply: bool, run_tests: bool, use_llm: bool,
+         renames: Optional[list[tuple[str, str]]] = None) -> None:
     from refactorika.pipeline.orchestrator import run_pipeline
 
-    planner = _llm_planner() if use_llm else None
+    planner = _build_planner(use_llm, renames)
     storage = Storage()
     mode = _c("APPLY (in place)", _RED) if apply else _c("dry-run (copy)", _DIM)
     typer.echo(f"\n{_BOLD}Refactorika{_RESET}  ·  {path}  ·  {mode}  ·  storage={storage.backend}")
@@ -128,12 +142,13 @@ def _print_graph(path: str) -> None:
     typer.echo("")
 
 
-def _print_plan(path: str, use_llm: bool) -> None:
+def _print_plan(path: str, use_llm: bool, renames=None) -> None:
     from refactorika.graph.resolver import build_graph
     from refactorika.pipeline.planner import deterministic_plan
 
     g = build_graph(path)
-    plan = (_llm_planner() or deterministic_plan)(g) if use_llm else deterministic_plan(g)
+    planner = _build_planner(use_llm, renames) or deterministic_plan
+    plan = planner(g, root=path)
     typer.echo(f"\n{_BOLD}Plan{_RESET} (leaf-to-root) — {len(plan.items)} items")
     for it in plan.items:
         s = it.spec
@@ -145,9 +160,19 @@ def _print_plan(path: str, use_llm: bool) -> None:
 
 def _is_improvement(metric: str, delta: int) -> bool:
     # Lower is better for these metrics.
-    if metric in ("sloc", "lloc", "dead_symbols", "avg_complexity", "max_complexity"):
+    if metric in ("sloc", "lloc", "dead_symbols", "total_complexity", "max_complexity"):
         return delta < 0
     return False
+
+
+def _build_planner(use_llm: bool, renames):
+    """Compose the planner: optional LLM judgment as the base, optional renames first."""
+    base = _llm_planner() if use_llm else None
+    if renames:
+        from refactorika.pipeline.planner import deterministic_plan, renames_first_planner
+
+        return renames_first_planner(renames, base=base or deterministic_plan)
+    return base
 
 
 def _llm_planner():

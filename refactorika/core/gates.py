@@ -70,28 +70,47 @@ def lint_gate(path: Path, baseline_violations: int) -> GateResult:
     """Normalize formatting (behavior-preserving) then reject only *new* lint violations."""
     if _tool("ruff") is None:
         return None, "ruff not installed — skipped"
-    subprocess.run([_tool("ruff"), "format", str(path)], capture_output=True, text=True)  # normalize
+    # normalize formatting first (behavior-preserving)
+    subprocess.run([_tool("ruff"), "format", str(path)], capture_output=True, text=True)
     new_count = _ruff_violation_count(path)
     if new_count > baseline_violations:
         return False, f"ruff: {new_count - baseline_violations} new violation(s)"
     return True, f"ruff clean ({new_count} <= {baseline_violations} baseline)"
 
 
-def typecheck_gate(path: Path) -> GateResult:
-    """pyright must report zero errors on the touched file."""
-    if _tool("pyright") is None:
-        return None, "pyright not installed — skipped"
+def _pyright_error_count(path: Path) -> Optional[int]:
+    """Number of pyright errors on *path*, or None if pyright output is unparseable."""
     out = subprocess.run(
         [_tool("pyright"), "--outputjson", str(path)], capture_output=True, text=True
     )
     try:
-        summary = json.loads(out.stdout).get("summary", {})
-        errors = summary.get("errorCount", 0)
+        return json.loads(out.stdout).get("summary", {}).get("errorCount", 0)
     except (json.JSONDecodeError, AttributeError):
+        return None
+
+
+def pyright_baseline(path: Path) -> int:
+    """Pyright error count on the original file, captured before the edit is written.
+
+    Single-file pyright can report environment-only errors (e.g. an unresolved import that
+    has nothing to do with the change). Baselining means we reject only *new* type errors,
+    exactly as the lint gate rejects only new lint violations.
+    """
+    if _tool("pyright") is None:
+        return 0
+    return _pyright_error_count(path) or 0
+
+
+def typecheck_gate(path: Path, baseline_errors: int = 0) -> GateResult:
+    """pyright must introduce no *new* type errors vs. the pre-edit baseline."""
+    if _tool("pyright") is None:
+        return None, "pyright not installed — skipped"
+    errors = _pyright_error_count(path)
+    if errors is None:
         return False, "pyright: unparseable output"
-    if errors:
-        return False, f"pyright: {errors} type error(s)"
-    return True, "pyright clean"
+    if errors > baseline_errors:
+        return False, f"pyright: {errors - baseline_errors} new type error(s)"
+    return True, f"pyright clean ({errors} <= {baseline_errors} baseline)"
 
 
 def test_gate(repo_dir: Path, node_ids: Optional[list[str]] = None) -> GateResult:

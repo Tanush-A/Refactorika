@@ -17,6 +17,7 @@ from typing import Optional
 from refactorika.core.gates import (
     lint_gate,
     parse_gate,
+    pyright_baseline,
     ruff_baseline,
     test_gate,
     typecheck_gate,
@@ -82,6 +83,7 @@ class Checker:
                 return self._finalize(record, "rolled-back", f"{self._rel(p)}: {detail}")
 
         baselines = {p: ruff_baseline(p) for p in paths}
+        tc_baselines = {p: pyright_baseline(p) for p in paths}
         for p in paths:
             p.write_text(edits[str(p)], encoding="utf-8")
         try:
@@ -91,9 +93,9 @@ class Checker:
                 checks.lint = ok
                 if ok is False:
                     return self._rollback(record, originals, f"{self._rel(p)}: {detail}")
-            # Gate 3 — types, per touched file.
+            # Gate 3 — types (new errors only vs pre-edit baseline), per touched file.
             for p in paths:
-                ok, detail = typecheck_gate(p)
+                ok, detail = typecheck_gate(p, tc_baselines[p])
                 checks.typecheck = ok
                 if ok is False:
                     return self._rollback(record, originals, f"{self._rel(p)}: {detail}")

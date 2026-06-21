@@ -41,7 +41,9 @@ def repo_metrics(root: str) -> dict:
         "sloc": sloc,
         "lloc": lloc,
         "functions": len(complexities),
-        "avg_complexity": round(sum(complexities) / len(complexities), 2) if complexities else 0,
+        # Total (summed) complexity is the honest headline — it drops as code is removed or
+        # decomposed. Average alone can rise when a simple dead function is removed.
+        "total_complexity": sum(complexities),
         "max_complexity": max(complexities) if complexities else 0,
         "dead_symbols": len(dead),
     }
