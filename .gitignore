@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Benchmark data — fetched on demand, never committed (mixed/GPL licenses upstream)
 eval/external/
 
@@ -13,10 +14,13 @@ venv/
 .pytest_cache/
 .ruff_cache/
 
-# Refactorika
-.refactorika/
-.env
-demo_repo/.git/
-
 # OS / editor
 .DS_Store
+=======
+.venv/
+.refactorika/
+__pycache__/
+*.pyc
+.env
+demo_repo/.git/
+>>>>>>> origin/narrow-scope-anika
