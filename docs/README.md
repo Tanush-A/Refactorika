@@ -13,3 +13,4 @@ The product spec, broken out by topic. This `docs/` folder is the **source of tr
 8. [Risks & Future Scope](08-risks-and-scope.md)
 9. [Success Metrics & Demo Script](09-success-metrics-and-demo.md)
 10. [Usage & User Journey](10-usage-and-user-journey.md)
+11. [Benchmarks & Evaluation](11-benchmarks-and-eval.md)
