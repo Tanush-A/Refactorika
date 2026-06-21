@@ -4,32 +4,40 @@ build-backend = "hatchling.build"
 
 [project]
 name = "refactorika"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.11"
 dependencies = [
     "anthropic[mcp]>=0.111.0",
     "tree-sitter>=0.23.0",
     "tree-sitter-python>=0.23.0",
     "redis>=5.0.0",
+    "numpy>=1.24",
 ]
 
 [project.optional-dependencies]
+semantic = [
+    "sentence-transformers>=2.0",
+    "openai>=1.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pyright>=1.1.0",
     "ruff>=0.6.0",
 ]
 
+[project.scripts]
+refactorika = "refactorika.mcp_server:main"
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/refactorika"]
+packages = ["refactorika"]
 
 [tool.pyright]
 pythonVersion = "3.11"
-include = ["src"]
+include = ["refactorika"]
 strict = true
 
 [tool.ruff]
-src = ["src"]
+src = ["refactorika"]
 target-version = "py311"
 
 [tool.ruff.lint]

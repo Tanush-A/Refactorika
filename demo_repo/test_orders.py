@@ -17,3 +17,12 @@ def test_silver_and_coupon() -> None:
 def test_skips_nonpositive() -> None:
     items = [{"price": 10.0, "qty": 0}, {"price": 20.0, "qty": 2}]  # only second counts
     assert compute_total(items, "bronze", None) == round(40 * 1.08, 2)
+
+
+def test_shipping() -> None:
+    from orders import _compute_shipping  # noqa: PLC0415
+    assert _compute_shipping(0.5) == 3.99
+    assert _compute_shipping(2.0) == pytest.approx(5.49)
+
+
+import pytest  # noqa: E402

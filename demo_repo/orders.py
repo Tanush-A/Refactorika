@@ -3,6 +3,18 @@ import math  # noqa: F811 — duplicate import (organization smell)
 from typing import Optional
 
 
+def _legacy_discount(price: float) -> float:
+    """Old discount logic — superseded by compute_total; nothing calls this."""
+    return price * 0.75
+
+
+def _compute_shipping(weight: float) -> float:
+    """Shipping calculator — reached via test_shipping below; should not be flagged dead."""
+    if weight <= 1.0:
+        return 3.99
+    return 3.99 + (weight - 1.0) * 1.50
+
+
 def compute_total(items: list[dict], customer_tier: str, coupon: Optional[str]) -> float:
     """Total price with tier discount, coupon, and tax. Deeply nested on purpose."""
     total = 0.0

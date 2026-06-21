@@ -7,7 +7,6 @@ from typing import Literal, Optional
 
 Status = Literal["committed", "rolled-back", "skipped-needs-human"]
 
-# Refactor kinds Claude may propose (organization + complexity).
 REFACTOR_KINDS = (
     "split_module",
     "reorder_imports",
@@ -15,6 +14,8 @@ REFACTOR_KINDS = (
     "split_function",
     "flatten_nesting",
     "dedupe_block",
+    "consolidate_duplicate",
+    "remove_dead_code",
 )
 
 
@@ -62,10 +63,16 @@ class EditRecord:
     status: Status = "rolled-back"
     failure_reason: Optional[str] = None
     diff: str = ""
+    files: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.files:
+            self.files = [self.file]
 
     def to_dict(self) -> dict:
         return {
             "file": self.file,
+            "files": self.files,
             "refactor_kind": self.refactor_kind,
             "checks": self.checks.to_dict(),
             "retries": self.retries,
@@ -73,3 +80,98 @@ class EditRecord:
             "failure_reason": self.failure_reason,
             "diff": self.diff,
         }
+
+
+# ---------------------------------------------------------------------------
+# V2 result types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SymbolRef:
+    file: str
+    name: str
+    line: int
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class DuplicatePair:
+    a: SymbolRef
+    b: SymbolRef
+    similarity: float
+    match_type: str  # "structural" | "semantic"
+    consolidation_target: SymbolRef
+    reason: str
+    rank: int
+
+    def to_dict(self) -> dict:
+        return {
+            "a": self.a.to_dict(),
+            "b": self.b.to_dict(),
+            "similarity": self.similarity,
+            "match_type": self.match_type,
+            "consolidation_target": self.consolidation_target.to_dict(),
+            "reason": self.reason,
+            "rank": self.rank,
+        }
+
+
+@dataclass
+class DeadSymbol:
+    kind: str  # "function" | "class" | "assignment"
+    name: str
+    file: str
+    line: int
+    confidence: str  # "high" | "medium" | "low"
+    reason: str
+    rank: int
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class ExportRef:
+    name: str
+    kind: str  # "function" | "class" | "assignment"
+    signature: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class ModuleContext:
+    path: str
+    purpose_hint: str
+    exports: list[ExportRef] = field(default_factory=list)
+    dependents: list[str] = field(default_factory=list)
+    flagged: list[str] = field(default_factory=list)
+    changed_since_last: list[str] = field(default_factory=list)
+    decisions: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "path": self.path,
+            "purpose_hint": self.purpose_hint,
+            "exports": [e.to_dict() for e in self.exports],
+            "dependents": self.dependents,
+            "flagged": self.flagged,
+            "changed_since_last": self.changed_since_last,
+            "decisions": self.decisions,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ModuleContext":
+        exports = [ExportRef(**e) for e in d.get("exports", [])]
+        return cls(
+            path=d["path"],
+            purpose_hint=d.get("purpose_hint", ""),
+            exports=exports,
+            dependents=d.get("dependents", []),
+            flagged=d.get("flagged", []),
+            changed_since_last=d.get("changed_since_last", []),
+            decisions=d.get("decisions", []),
+        )

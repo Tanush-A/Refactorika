@@ -103,3 +103,35 @@ class Storage:
         data = self._read_json()
         data["cache"][key] = value
         self._write_json(data)
+
+    # --- vector index fallback (brute-force when RediSearch unavailable) -------
+    def vector_upsert(self, key: str, entry: dict) -> None:
+        """Persist a vector entry {vector, meta} to JSON fallback."""
+        if self._redis:
+            self._redis.hset("refactorika:vectors", key, json.dumps(entry))
+            return
+        data = self._read_json()
+        data.setdefault("vectors", {})[key] = entry
+        self._write_json(data)
+
+    def vector_get_all(self) -> dict:
+        """Return all vector entries keyed by their string key."""
+        if self._redis:
+            raw = self._redis.hgetall("refactorika:vectors")
+            return {k: json.loads(v) for k, v in raw.items()}
+        return self._read_json().get("vectors", {})
+
+    def vector_delete_all(self) -> None:
+        if self._redis:
+            self._redis.delete("refactorika:vectors")
+            return
+        data = self._read_json()
+        data.pop("vectors", None)
+        self._write_json(data)
+
+    # --- JSON state helpers for low-level access (used by memory/ modules) -----
+    def _read_state(self) -> dict:
+        return self._read_json()
+
+    def _write_state(self, data: dict) -> None:
+        self._write_json(data)
