@@ -18,6 +18,8 @@ _load_dotenv()
 
 
 def _hybrid_ready() -> tuple[bool, str]:
+    if os.environ.get("REFACTORIKA_OFFLINE", "").lower() in ("1", "true", "yes"):
+        return False, "offline mode"
     if not os.environ.get("OPENAI_API_KEY"):
         return False, "no OPENAI_API_KEY"
     url = os.environ.get("REDIS_URL")

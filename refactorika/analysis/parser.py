@@ -91,8 +91,31 @@ def function_text(node: Node, source: str) -> str:
     return source.encode()[start:end].decode()
 
 
+_NESTING_NODES = frozenset({
+    "if_statement", "for_statement", "while_statement", "with_statement",
+    "try_statement", "match_statement",
+})
+
+
+def max_nesting_depth(node: Node) -> int:
+    """Deepest nesting of control-flow blocks inside a function (signature itself = 0).
+
+    A long-but-flat function and a short-but-deeply-nested one are both god-function
+    shapes; line count alone sees neither. This captures the nesting axis.
+    """
+
+    def _walk(n: Node, depth: int) -> int:
+        deepest = depth
+        for child in n.children:
+            child_depth = depth + 1 if child.type in _NESTING_NODES else depth
+            deepest = max(deepest, _walk(child, child_depth))
+        return deepest
+
+    return _walk(node, 0)
+
+
 def canonical_type_stream(node: Node) -> list[str]:
-    """Return a list of node types from a subtree, replacing identifiers/literals with placeholders."""
+    """Return node types from a subtree, replacing identifiers/literals with placeholders."""
     result: list[str] = []
 
     def _walk(n: Node) -> None:

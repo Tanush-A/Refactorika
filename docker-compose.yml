@@ -1,0 +1,34 @@
+# Local Redis for Refactorika so the tool runs standalone (no cloud needed).
+# redis-stack-server bundles RediSearch, so the decision vector index works locally and is
+# viewable in Redis Insight (http://localhost:8001). For the real run, instead point the tool
+# at Redis Cloud by setting REDIS_URL=rediss://... in your .env (no compose needed).
+#
+#   docker compose up -d redis
+#   REDIS_URL=redis://localhost:6379/0 refactorika demo_repo --llm
+#
+# The optional agent-memory-server profile wires Redis Iris Agent Memory (semantic long-term
+# memory) on top of the same Redis. Enable with:  docker compose --profile memory up -d
+services:
+  redis:
+    image: redis/redis-stack:latest
+    ports:
+      - "6379:6379"     # Redis
+      - "8001:8001"     # Redis Insight UI
+    volumes:
+      - refactorika-redis:/data
+
+  agent-memory-server:
+    image: ghcr.io/redis/agent-memory-server:latest
+    profiles: ["memory"]
+    depends_on:
+      - redis
+    environment:
+      # Point Agent Memory at the same Redis; generation via Anthropic, embeddings local.
+      REDIS_URL: redis://redis:6379/0
+      GENERATION_MODEL_PROVIDER: anthropic
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    ports:
+      - "8000:8000"
+
+volumes:
+  refactorika-redis:

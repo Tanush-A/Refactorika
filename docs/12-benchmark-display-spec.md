@@ -1,5 +1,11 @@
 # Refactorika Benchmark — Display & Reporting Spec
 
+> ⚠️ **Superseded / folded into [11-benchmarks-and-eval.md](11-benchmarks-and-eval.md).** The
+> as-built eval reports three honest numbers (in-scope pass rate, in-scope subtask completion,
+> out-of-scope count) and writes JSON + markdown tables to `eval/results/`. The audit-era display
+> notes below are historical.
+
+
 A spec for how final benchmark results are presented (data-dense terminal report + per-run JSON + run-over-run diff), **plus an implementation map tying every piece to a concrete file in the repo** so it isn't a floating doc.
 
 > Scope: **spec + map, no code committed yet.** Defines the *output contract* and *where each part lands*, so it stays stable while the harness changes underneath.
