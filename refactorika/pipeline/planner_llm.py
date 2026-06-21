@@ -92,33 +92,60 @@ def llm_plan(
     extra: list[PlanItem] = []
 
     for qual, source in _god_functions(graph, root):
-        pattern = _shape_pattern(source)
-        prior = dm.recall(source, pattern)
-        neighbors = _neighbor_context(qual, graph, cb_vectors, dm)
-        prompt = _decompose_prompt(source, prior, neighbors)
-        resp = client.complete_json(_SYSTEM, prompt)
-        if not resp or not resp.get("new_source"):
-            continue
-        rationale = resp.get("rationale", "decompose god function into named helpers")
-        if prior:
-            how = (dm.last_match or {}).get("how", "prior")
-            rationale += f" (consistent with prior decision, recalled by {how})"
-        extra.append(PlanItem(
-            spec=TransformSpec(
-                kind="decompose_function", target=qual,
-                params={"new_source": resp["new_source"]}, rationale=rationale,
-            ),
-            order_index=pos.get(qual, 0),
-            impact=sorted(impact_of(graph, qual)),
-        ))
-        dm.record(RefactorDecision(
-            pattern=pattern, transform_kind="decompose_function", target=qual,
-            choice={"helper_names": resp.get("helper_names", [])},
-        ), source)
+        item = decompose_item(
+            qual, source, graph,
+            client=client, dm=dm, cb_vectors=cb_vectors, order_index=pos.get(qual, 0),
+        )
+        if item is not None:
+            extra.append(item)
 
     items = base.items + extra
     items.sort(key=lambda it: it.order_index)
     return Worklist(items=items, cycles=base.cycles)
+
+
+def decompose_item(
+    qual: str,
+    source: str,
+    graph: Graph,
+    *,
+    client: LLMClient,
+    dm: DecisionMemory,
+    cb_vectors=None,
+    order_index: int = 0,
+) -> Optional[PlanItem]:
+    """LLM judgment for one god function, as a single reusable decision step.
+
+    Recalls how a structurally-similar function was split before (decision memory), prompts the
+    LLM for a behavior-preserving decomposition, returns a ``decompose_function`` PlanItem, and
+    records the decision for future consistency. Returns None if the LLM declines or yields
+    nothing. This is the single source of truth for the decompose decision — shared by the LLM
+    planner and the complexity agent, so the agent spine and the pipeline make identical calls.
+    """
+    pattern = _shape_pattern(source)
+    prior = dm.recall(source, pattern)
+    neighbors = _neighbor_context(qual, graph, cb_vectors, dm) if cb_vectors is not None else ""
+    prompt = _decompose_prompt(source, prior, neighbors)
+    resp = client.complete_json(_SYSTEM, prompt)
+    if not resp or not resp.get("new_source"):
+        return None
+    rationale = resp.get("rationale", "decompose god function into named helpers")
+    if prior:
+        how = (dm.last_match or {}).get("how", "prior")
+        rationale += f" (consistent with prior decision, recalled by {how})"
+    item = PlanItem(
+        spec=TransformSpec(
+            kind="decompose_function", target=qual,
+            params={"new_source": resp["new_source"]}, rationale=rationale,
+        ),
+        order_index=order_index,
+        impact=sorted(impact_of(graph, qual)),
+    )
+    dm.record(RefactorDecision(
+        pattern=pattern, transform_kind="decompose_function", target=qual,
+        choice={"helper_names": resp.get("helper_names", [])},
+    ), source)
+    return item
 
 
 # --------------------------------------------------------------------------- helpers
