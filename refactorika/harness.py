@@ -147,10 +147,11 @@ def verify_edits(
 
     def reject(gate: str, reason: str) -> VerificationRecord:
         for rel, path in paths.items():
-            if originals[rel] is None:
+            original = originals[rel]
+            if original is None:
                 path.unlink(missing_ok=True)
             else:
-                path.write_text(originals[rel])
+                path.write_text(original)
         record.status = "rolled-back"
         record.failure_reason = f"{gate}: {reason}"
         record.gate_details[gate] = reason

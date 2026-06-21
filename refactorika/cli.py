@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .core.analyze import analyze_file
 from .core.storage import Storage
+from .observability import capture_exception, init_sentry
 
 
 def _header(text: str, width: int = 60) -> str:
@@ -29,9 +30,9 @@ def cmd_scan(path: str, no_dupes: bool, no_dead: bool, no_docs: bool) -> None:
     # ── 1. Structural analysis ────────────────────────────────────────────────
     print(_header("1 / 4  Structural opportunities"))
     py_files = sorted(p.rglob("*.py")) if p.is_dir() else [p]
-    py_files = [f for f in py_files if not any(
-        part in {".venv", "__pycache__", ".git"} for part in f.parts
-    )]
+    py_files = [
+        f for f in py_files if not any(part in {".venv", "__pycache__", ".git"} for part in f.parts)
+    ]
 
     total_opps = 0
     for f in py_files:
@@ -59,6 +60,7 @@ def cmd_scan(path: str, no_dupes: bool, no_dead: bool, no_docs: bool) -> None:
         try:
             from .analysis.duplicates import find_duplicates  # noqa: PLC0415
             from .memory.vector_index import VectorIndex  # noqa: PLC0415
+
             vi = VectorIndex(storage)
             dup_result = find_duplicates(str(p), storage, vi)
             pairs = dup_result.get("pairs", [])
@@ -85,6 +87,7 @@ def cmd_scan(path: str, no_dupes: bool, no_dead: bool, no_docs: bool) -> None:
         print(_header("3 / 4  Dead code"))
         try:
             from .analysis.dead_code import find_dead_code  # noqa: PLC0415
+
             dead_result = find_dead_code(str(p), storage)
             dead = dead_result.get("dead_symbols", [])
             high = [d for d in dead if d["confidence"] == "high"]
@@ -119,6 +122,7 @@ def cmd_scan(path: str, no_dupes: bool, no_dead: bool, no_docs: bool) -> None:
             from .docs_gen import generate_docs  # noqa: PLC0415
             from .memory.agent_memory import AgentMemory  # noqa: PLC0415
             from .memory.context import ContextRetriever  # noqa: PLC0415
+
             mem = AgentMemory(storage)
             ret = ContextRetriever(storage, mem)
             for f in py_files[:5]:  # cap at 5 files for scan speed
@@ -139,7 +143,10 @@ def cmd_scan(path: str, no_dupes: bool, no_dead: bool, no_docs: bool) -> None:
                 except Exception as exc:
                     print(f"  [error] {f.name}: {exc}")
             if len(py_files) > 5:
-                print(f"\n  (showing 5 of {len(py_files)} files — run generate_docs per-file for full output)")
+                print(
+                    f"\n  (showing 5 of {len(py_files)} files — run generate_docs "
+                    "per-file for full output)"
+                )
         except Exception as exc:
             print(f"  [error] {exc}")
 
@@ -164,9 +171,11 @@ def cmd_fix(path: str, dry_run: bool, kinds: list[str]) -> None:
     p = Path(path).resolve()
     storage = Storage()
     py_files = sorted(p.rglob("*.py")) if p.is_dir() else [p]
-    py_files = [f for f in py_files if not any(
-        part in {".venv", "__pycache__", ".git", "tests"} for part in f.parts
-    )]
+    py_files = [
+        f
+        for f in py_files
+        if not any(part in {".venv", "__pycache__", ".git", "tests"} for part in f.parts)
+    ]
 
     committed = 0
     rolled_back = 0
@@ -258,8 +267,12 @@ def cmd_fix(path: str, dry_run: bool, kinds: list[str]) -> None:
 def _print_record(record) -> None:
     gates = record.checks
     parts = []
-    for name, val in [("parse", gates.parse), ("lint", gates.lint),
-                      ("type", gates.typecheck), ("tests", gates.tests)]:
+    for name, val in [
+        ("parse", gates.parse),
+        ("lint", gates.lint),
+        ("type", gates.typecheck),
+        ("tests", gates.tests),
+    ]:
         if val is True:
             parts.append(f"{name}:✓")
         elif val is False:
@@ -304,29 +317,38 @@ def main() -> None:
     )
     fix_p.add_argument("path", help="File or directory to fix")
     fix_p.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Show what would change without writing anything",
     )
     fix_p.add_argument(
-        "--kinds", default="imports,dead",
+        "--kinds",
+        default="imports,dead",
         help="Comma-separated fix kinds to apply (default: imports,dead)",
     )
 
     sub.add_parser("serve", help="Start the MCP server")
 
     args = parser.parse_args()
+    if args.command not in {"serve", None}:
+        init_sentry("cli")
 
-    if args.command == "scan":
-        cmd_scan(args.path, args.no_dupes, args.no_dead, args.no_docs)
-    elif args.command == "fix":
-        kinds = [k.strip() for k in args.kinds.split(",")]
-        cmd_fix(args.path, args.dry_run, kinds)
-    elif args.command == "serve" or args.command is None:
-        from .mcp_server import main as mcp_main  # noqa: PLC0415
-        mcp_main()
-    else:
-        parser.print_help()
-        sys.exit(1)
+    try:
+        if args.command == "scan":
+            cmd_scan(args.path, args.no_dupes, args.no_dead, args.no_docs)
+        elif args.command == "fix":
+            kinds = [k.strip() for k in args.kinds.split(",")]
+            cmd_fix(args.path, args.dry_run, kinds)
+        elif args.command == "serve" or args.command is None:
+            from .mcp_server import main as mcp_main  # noqa: PLC0415
+
+            mcp_main()
+        else:
+            parser.print_help()
+            sys.exit(1)
+    except Exception as exc:
+        capture_exception(exc, component="cli", phase=args.command or "serve")
+        raise
 
 
 if __name__ == "__main__":

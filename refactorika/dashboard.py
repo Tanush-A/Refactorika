@@ -1,8 +1,12 @@
-"""Render the edit log — visible verification is the whole product. Run: python -m refactorika.dashboard"""
+"""Render the edit log — visible verification is the whole product.
+
+Run with ``python -m refactorika.dashboard``.
+"""
 
 from __future__ import annotations
 
 from .core.storage import Storage
+from .observability import capture_exception, init_sentry
 
 _MARK = {True: "PASS", False: "FAIL", None: "skip"}
 _STATUS = {
@@ -20,7 +24,9 @@ def render(log: list[dict]) -> str:
         lines.append("")
         lines.append(f"  #{i}  {r['refactor_kind']}  on  {r['file'].split('/')[-1]}")
         lines.append(f"      gates: {gates}")
-        lines.append(f"      status: {_STATUS.get(r['status'], r['status'])}  (retries: {r['retries']})")
+        lines.append(
+            f"      status: {_STATUS.get(r['status'], r['status'])}  (retries: {r['retries']})"
+        )
         if r["failure_reason"]:
             lines.append(f"      reason: {r['failure_reason']}")
     lines.append("")
@@ -147,7 +153,12 @@ def render_campaign(audit_before: dict, plan: dict, log: list[dict], audit_after
 
 
 def main() -> None:
-    print(render(Storage().get_log()))
+    init_sentry("dashboard")
+    try:
+        print(render(Storage().get_log()))
+    except Exception as exc:
+        capture_exception(exc, component="dashboard", phase="render")
+        raise
 
 
 if __name__ == "__main__":

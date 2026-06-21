@@ -21,15 +21,14 @@ refactor this codebase
 The arms generate independent proposals:
 
 - **OFF:** the model receives the generic request and visible repository
-  snapshot, creates its own refactoring plan, then receives that plan and the
-  repository in a second call to produce edits.
+  snapshot, then selects and implements a refactor in one autonomous call.
 - **ON:** Refactorika runs its repository audit and dependency-ordered planning,
   reads repository architecture notes, and constructs a scoped edit prompt.
   The model produces edits independently from OFF. Refactorika applies parse,
   ruff, pyright, and visible pytest gates atomically. Rejections are rolled back
   and detailed gate results are returned for at most two repairs.
 
-The intervention therefore includes Refactorika's context selection, prompt
+Both arms receive one initial model call. The intervention includes Refactorika's context selection, prompt
 construction, verification, rollback, and repair policy. Model, temperature,
 repository, provider, and trial count are held constant. Token use and elapsed
 time are reported rather than forced equal because efficiency is part of the
@@ -58,6 +57,31 @@ An edit that preserves behavior but misses the structural target is an
 `incomplete_refactor_shipped`. An ON proposal rejected after its repair budget
 is `skipped-needs-human`.
 
+## Metrics
+
+Correctness is the headline: initial and final correct-landed rates, behavior
+regressions, incomplete refactors, safe escalations, and paired wins/ties/losses.
+Case-macro rates and case-clustered bootstrap intervals prevent repeated trials
+from being treated as independent repositories.
+
+Diagnostics cover model calls, input/output/cache tokens, explicit pricing,
+audit/model/gate/grading/end-to-end time, required-path recall, unrelated-edit
+precision, churn, missed call sites, compatibility, retries, and patch diversity.
+The result schema is versioned under `meta.schema_version`.
+
+## Error reporting
+
+Set `SENTRY_DSN` to enable privacy-safe errors-only telemetry. Sentry receives
+unexpected product, provider, grader, artifact, and baseline-comparison failures.
+It never receives prompts, patches, source, local variables, raw diagnostics,
+request bodies, or secrets. Normal model failures and gate rejections remain
+only in the local JSON artifact.
+
+Supplying `--baseline <artifact.json>` emits at most one sanitized warning when
+ON correctness drops by more than `--regression-threshold` (default `0.10`) or
+ON ships a behavior regression. Telemetry is fail-open and cannot invalidate a
+run.
+
 ## Commands
 
 ```bash
@@ -66,6 +90,10 @@ make benchmark-full-calibrate
 
 # Full run: nine cases x three trials x two arms.
 MODEL=claude-sonnet-4-5-20250929 make benchmark-full-agent
+
+# Optional cost accounting and aggregate regression warning.
+INPUT_COST_PER_MTOK=3 OUTPUT_COST_PER_MTOK=15 \
+BASELINE=eval/baselines/full-system.json make benchmark-full-agent
 
 # One-case pilot.
 eval/.venv/bin/python -m eval.full_system_bench \

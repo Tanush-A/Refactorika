@@ -43,7 +43,12 @@ benchmark-full-agent:  ## Run independent harness OFF-vs-ON full-system agents
 		--provider "$${PROVIDER:-anthropic}" \
 		--model "$${MODEL:-claude-sonnet-4-5-20250929}" \
 		--base-url "$${BASE_URL:-http://localhost:11434/v1}" \
-		--trials "$${TRIALS:-3}" --max-retries "$${MAX_RETRIES:-2}"
+		--trials "$${TRIALS:-3}" --max-retries "$${MAX_RETRIES:-2}" \
+		--input-cost-per-mtok "$${INPUT_COST_PER_MTOK:-0}" \
+		--output-cost-per-mtok "$${OUTPUT_COST_PER_MTOK:-0}" \
+		--cache-read-cost-per-mtok "$${CACHE_READ_COST_PER_MTOK:-0}" \
+		--cache-write-cost-per-mtok "$${CACHE_WRITE_COST_PER_MTOK:-0}" \
+		$${BASELINE:+--baseline "$${BASELINE}"}
 
 test:  ## Run harness and benchmark unit tests
 	@test -x eval/.venv/bin/python || bash eval/run_eval.sh --setup

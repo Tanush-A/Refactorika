@@ -12,6 +12,7 @@ dependencies = [
     "tree-sitter-python>=0.23.0",
     "redis>=5.0.0",
     "numpy>=1.24",
+    "sentry-sdk>=2.0",
 ]
 
 [project.optional-dependencies]

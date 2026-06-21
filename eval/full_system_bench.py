@@ -10,8 +10,11 @@ gate-guided retries. Held-out tests are injected only by the final grader.
 from __future__ import annotations
 
 import argparse
+import difflib
+import hashlib
 import json
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -19,14 +22,20 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from refactorika.analysis.audit import build_plan
 from refactorika.core.storage import Storage
 from refactorika.harness import mark_escalated, verify_edits
+from refactorika.observability import (
+    capture_benchmark_regression,
+    capture_exception,
+    init_sentry,
+)
 
 from eval.full_system_cases import ALL_CASES, USER_PROMPT
 from eval.full_system_cases.behavior import BehaviorCase
@@ -44,20 +53,59 @@ class CaseAdapter:
     baseline_files: dict[str, str]
     hidden_tests: dict[str, str]
     user_prompt: str
+    required_paths: frozenset[str]
+    allowed_paths: frozenset[str]
 
 
 @dataclass
 class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
     def add(self, other: "Usage") -> None:
         self.input_tokens += other.input_tokens
         self.output_tokens += other.output_tokens
+        self.cache_read_tokens += other.cache_read_tokens
+        self.cache_write_tokens += other.cache_write_tokens
 
     @property
     def total(self) -> int:
-        return self.input_tokens + self.output_tokens
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + self.cache_read_tokens
+            + self.cache_write_tokens
+        )
+
+
+@dataclass(frozen=True)
+class Pricing:
+    input_per_mtok: float = 0.0
+    output_per_mtok: float = 0.0
+    cache_read_per_mtok: float = 0.0
+    cache_write_per_mtok: float = 0.0
+
+    def cost(self, usage: Usage) -> float | None:
+        rates = (
+            self.input_per_mtok,
+            self.output_per_mtok,
+            self.cache_read_per_mtok,
+            self.cache_write_per_mtok,
+        )
+        if not any(rates):
+            return None
+        return round(
+            (
+                usage.input_tokens * self.input_per_mtok
+                + usage.output_tokens * self.output_per_mtok
+                + usage.cache_read_tokens * self.cache_read_per_mtok
+                + usage.cache_write_tokens * self.cache_write_per_mtok
+            )
+            / 1_000_000,
+            6,
+        )
 
 
 @dataclass
@@ -66,6 +114,7 @@ class Completion:
     usage: Usage
     seconds: float
     error: str | None = None
+    error_class: str | None = None
 
 
 @dataclass
@@ -76,6 +125,8 @@ class Proposal:
     prompt: str
     plan: str | None = None
     error: str | None = None
+    model_calls: int = 1
+    error_class: str | None = None
 
 
 class Backend(Protocol):
@@ -89,8 +140,20 @@ def adapt_case(case: object) -> CaseAdapter:
 
     if isinstance(case, BehaviorCase):
         hidden = dict(case.hidden_tests)
+        required = frozenset(
+            expectation.target_path for expectation in case.structural_expectations
+        )
     elif isinstance(case, (MultiFileCase, RecoveryCase)):
         hidden = {"tests/oracle/test_hidden.py": case.hidden_tests}
+        if isinstance(case, MultiFileCase):
+            required = frozenset(expectation.path for expectation in case.expectations)
+        else:
+            required = frozenset(
+                path
+                for attempt in case.attempts
+                for path in attempt
+                if path.endswith(".py") and not path.startswith("tests/")
+            )
     else:
         raise TypeError(f"unsupported full-system case: {type(case).__name__}")
     return CaseAdapter(
@@ -99,6 +162,8 @@ def adapt_case(case: object) -> CaseAdapter:
         baseline_files=dict(case.baseline_files),
         hidden_tests=hidden,
         user_prompt=case.user_prompt,
+        required_paths=required,
+        allowed_paths=required,
     )
 
 
@@ -125,15 +190,16 @@ def visible_snapshot(repo: Path) -> dict[str, str]:
     return files
 
 
-def build_off_planning_prompt(case: CaseAdapter, repo: Path) -> str:
-    """Let the non-harness agent decide what the generic request means."""
+def build_off_prompt(case: CaseAdapter, repo: Path) -> str:
+    """Ask the non-harness agent to select and implement a refactor in one call."""
 
     return (
-        "You are the planning stage of an autonomous refactoring agent.\n"
+        "You are an autonomous refactoring agent.\n"
         f"User request (verbatim): {case.user_prompt}\n\n"
         "Inspect the repository snapshot, choose the highest-value behavior-preserving "
-        "refactor, identify all affected call sites and compatibility constraints, and "
-        "write a concise implementation plan. Hidden tests may exist.\n\n"
+        "refactor, update all affected call sites, and preserve compatibility. Hidden tests "
+        "may exist. Return ONLY a JSON object mapping changed relative Python file paths to "
+        "their complete new contents. Do not return markdown or edit tests.\n\n"
         f"Repository snapshot:\n{json.dumps(visible_snapshot(repo), sort_keys=True)}"
     )
 
@@ -186,7 +252,15 @@ def build_edit_prompt(
 
 def _decode_patch(completion: Completion, prompt: str, plan: str | None = None) -> Proposal:
     if completion.error:
-        return Proposal({}, completion.usage, completion.seconds, prompt, plan, completion.error)
+        return Proposal(
+            {},
+            completion.usage,
+            completion.seconds,
+            prompt,
+            plan,
+            completion.error,
+            error_class=completion.error_class or "provider_failure",
+        )
     raw = completion.text.strip()
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
@@ -205,22 +279,20 @@ def _decode_patch(completion: Completion, prompt: str, plan: str | None = None) 
             raise ValueError("agent attempted to edit tests")
         return Proposal(edits, completion.usage, completion.seconds, prompt, plan)
     except (json.JSONDecodeError, ValueError) as exc:
-        return Proposal({}, completion.usage, completion.seconds, prompt, plan, str(exc))
+        return Proposal(
+            {},
+            completion.usage,
+            completion.seconds,
+            prompt,
+            plan,
+            str(exc),
+            error_class="malformed_response",
+        )
 
 
 def propose_off(backend: Backend, case: CaseAdapter, repo: Path) -> Proposal:
-    planning_prompt = build_off_planning_prompt(case, repo)
-    planning = backend.complete(planning_prompt)
-    if planning.error:
-        return Proposal({}, planning.usage, planning.seconds, planning_prompt, error=planning.error)
-    edit_prompt = build_edit_prompt(case, repo, planning.text)
-    completion = backend.complete(edit_prompt)
-    usage = Usage(planning.usage.input_tokens, planning.usage.output_tokens)
-    usage.add(completion.usage)
-    proposal = _decode_patch(completion, edit_prompt, planning.text)
-    proposal.usage = usage
-    proposal.seconds += planning.seconds
-    return proposal
+    prompt = build_off_prompt(case, repo)
+    return _decode_patch(backend.complete(prompt), prompt)
 
 
 def propose_on(
@@ -362,34 +434,157 @@ def calibrate(cases: tuple[CaseAdapter, ...] = CASES) -> dict[str, object]:
     return {"valid": valid, "records": records}
 
 
-def _run_pair(case: CaseAdapter, backend: Backend, trial: int, max_retries: int) -> list[dict]:
+def _outcome(landed: bool, behavior: bool, structure: list[str]) -> dict[str, object]:
+    return {
+        "landed": landed,
+        "behavior_pass": behavior if landed else None,
+        "structural_pass": not structure if landed else None,
+        "correct_landed": landed and behavior and not structure,
+        "regression_shipped": landed and not behavior,
+        "incomplete_refactor_shipped": landed and behavior and bool(structure),
+    }
+
+
+def _grade_proposal(
+    case: CaseAdapter, proposal: Proposal, destination: Path
+) -> tuple[bool, str, list[str]]:
+    repo = materialize(case, destination)
+    error = proposal.error or _write_patch(repo, proposal.edits)
+    return (False, error, []) if error else oracle_grade(case, repo)
+
+
+def _change_metrics(
+    case: CaseAdapter, edits: dict[str, str], structural_failures: list[str]
+) -> dict[str, object]:
+    touched: set[str] = set()
+    added = 0
+    deleted = 0
+    new_files = 0
+    for path, content in edits.items():
+        if path.startswith("tests/") or not path.endswith(".py"):
+            continue
+        original = case.baseline_files.get(path)
+        if original == content:
+            continue
+        touched.add(path)
+        if original is None:
+            new_files += 1
+            added += len(content.splitlines())
+            continue
+        matcher = difflib.SequenceMatcher(a=original.splitlines(), b=content.splitlines())
+        for tag, a1, a2, b1, b2 in matcher.get_opcodes():
+            if tag in {"delete", "replace"}:
+                deleted += a2 - a1
+            if tag in {"insert", "replace"}:
+                added += b2 - b1
+    required_touched = touched & set(case.required_paths)
+    allowed_touched = touched & set(case.allowed_paths)
+    compatibility_failures = [
+        failure for failure in structural_failures if failure.startswith("exports ")
+    ]
+    return {
+        "files_changed": len(touched),
+        "new_files": new_files,
+        "lines_added": added,
+        "lines_deleted": deleted,
+        "total_churn": added + deleted,
+        "required_path_recall": round(len(required_touched) / len(case.required_paths), 3)
+        if case.required_paths
+        else None,
+        "unrelated_edit_precision": round(len(allowed_touched) / len(touched), 3)
+        if touched
+        else None,
+        "structural_effect_recall": 0.0 if structural_failures else 1.0,
+        "missed_call_sites": sum(
+            failure.startswith(("calls ", "imports_from ")) for failure in structural_failures
+        ),
+        "compatibility_pass": not compatibility_failures,
+        "patch_hash": hashlib.sha256(json.dumps(edits, sort_keys=True).encode()).hexdigest()[:16],
+    }
+
+
+def _usage_record(usage: Usage, calls: int, pricing: Pricing) -> dict[str, object]:
+    return {
+        "model_calls": calls,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cache_read_tokens": usage.cache_read_tokens,
+        "cache_write_tokens": usage.cache_write_tokens,
+        "total_tokens": usage.total,
+        "cost_dollars": pricing.cost(usage),
+    }
+
+
+def _run_pair(
+    case: CaseAdapter,
+    backend: Backend,
+    trial: int,
+    max_retries: int,
+    pricing: Pricing,
+) -> list[dict]:
     with tempfile.TemporaryDirectory(prefix=f"full-{case.name}-") as tmp:
+        pair_root = Path(tmp)
         off_repo = materialize(case, Path(tmp) / "off")
         on_repo = materialize(case, Path(tmp) / "on")
 
+        off_started = time.perf_counter()
         off = propose_off(backend, case, off_repo)
+        apply_started = time.perf_counter()
         off_error = off.error or _write_patch(off_repo, off.edits)
+        off_apply_seconds = time.perf_counter() - apply_started
+        grade_started = time.perf_counter()
         off_behavior, off_detail, off_structure = (
             (False, off_error, []) if off_error else oracle_grade(case, off_repo)
         )
-        off_correct = not bool(off_error) and off_behavior and not off_structure
+        off_grading_seconds = time.perf_counter() - grade_started
+        off_landed = not bool(off_error)
+        off_outcome = _outcome(off_landed, off_behavior, off_structure)
+        off_end_to_end = time.perf_counter() - off_started
 
+        on_started = time.perf_counter()
+        audit_started = time.perf_counter()
         harness_prompt = build_harness_prompt(case, on_repo)
+        audit_seconds = time.perf_counter() - audit_started
         usage = Usage()
-        seconds = 0.0
+        model_seconds = 0.0
+        gate_seconds = 0.0
+        grading_seconds = 0.0
         final = None
         current: Proposal | None = None
         failure = None
+        attempts: list[Proposal] = []
+        attempt_records: list[dict[str, object]] = []
+        initial_outcome: dict[str, object] | None = None
+        initial_detail = ""
+        initial_structure: list[str] = []
+        initial_checks = None
         for attempt in range(max_retries + 1):
             current = propose_on(
                 backend, case, on_repo, harness_prompt=harness_prompt, failure=failure
             )
+            attempts.append(current)
             usage.add(current.usage)
-            seconds += current.seconds
+            model_seconds += current.seconds
             if current.error:
                 failure = current.error
+                attempt_records.append(
+                    {
+                        "attempt": attempt,
+                        "status": "proposal_error",
+                        "error_class": current.error_class,
+                        "failure_gate": None,
+                        "checks": None,
+                        "rollback_integrity": True,
+                    }
+                )
+                if attempt == 0:
+                    initial_outcome = _outcome(False, False, [])
+                    initial_detail = current.error
+                if current.error_class == "configuration_failure":
+                    break
             else:
                 try:
+                    gates_started = time.perf_counter()
                     final = verify_edits(
                         on_repo,
                         current.edits,
@@ -397,18 +592,71 @@ def _run_pair(case: CaseAdapter, backend: Backend, trial: int, max_retries: int)
                         required_gates=REQUIRED_GATES,
                         retries=attempt,
                     )
+                    gate_seconds += time.perf_counter() - gates_started
+                    failure_gate = (
+                        final.failure_reason.split(":", 1)[0] if final.failure_reason else None
+                    )
+                    rollback_integrity = final.status == "committed" or (
+                        all(
+                            (on_repo / path).is_file() and (on_repo / path).read_text() == content
+                            for path, content in case.baseline_files.items()
+                        )
+                        and all(
+                            path in case.baseline_files or not (on_repo / path).exists()
+                            for path in current.edits
+                        )
+                    )
+                    attempt_records.append(
+                        {
+                            "attempt": attempt,
+                            "status": final.status,
+                            "error_class": None,
+                            "failure_gate": failure_gate,
+                            "checks": asdict(final.checks),
+                            "rollback_integrity": rollback_integrity,
+                        }
+                    )
+                    if attempt == 0:
+                        initial_checks = asdict(final.checks)
                     if final.status == "committed":
                         break
                     failure = json.dumps(final.gate_details, sort_keys=True)
+                    if attempt == 0:
+                        initial_grade_started = time.perf_counter()
+                        behavior, initial_detail, initial_structure = _grade_proposal(
+                            case, current, pair_root / "initial-on-grade"
+                        )
+                        grading_seconds += time.perf_counter() - initial_grade_started
+                        initial_outcome = _outcome(True, behavior, initial_structure)
                 except ValueError as exc:
                     failure = str(exc)
+                    attempt_records.append(
+                        {
+                            "attempt": attempt,
+                            "status": "invalid_patch",
+                            "error_class": "invalid_patch",
+                            "failure_gate": "patch_validation",
+                            "checks": None,
+                            "rollback_integrity": True,
+                        }
+                    )
+                    if attempt == 0:
+                        initial_outcome = _outcome(False, False, [])
+                        initial_detail = str(exc)
         committed = final is not None and final.status == "committed"
         if final is not None and not committed:
             mark_escalated(final)
+        final_grade_started = time.perf_counter()
         on_behavior, on_detail, on_structure = (
             oracle_grade(case, on_repo) if committed else (False, "not landed", [])
         )
-        on_correct = committed and on_behavior and not on_structure
+        grading_seconds += time.perf_counter() - final_grade_started
+        on_outcome = _outcome(committed, on_behavior, on_structure)
+        if initial_outcome is None:
+            initial_outcome = dict(on_outcome)
+            initial_detail = on_detail
+            initial_structure = list(on_structure)
+        on_end_to_end = time.perf_counter() - on_started
 
         common = {"case": case.name, "trial": trial, "initial_user_prompt": case.user_prompt}
         return [
@@ -416,17 +664,25 @@ def _run_pair(case: CaseAdapter, backend: Backend, trial: int, max_retries: int)
                 **common,
                 "arm": "off",
                 "status": "shipped" if not off_error else "error",
-                "landed": not bool(off_error),
-                "correct_landed": off_correct,
-                "regression_shipped": not bool(off_error) and not off_behavior,
-                "incomplete_refactor_shipped": (
-                    not bool(off_error) and off_behavior and bool(off_structure)
-                ),
+                **off_outcome,
                 "oracle_pass": off_behavior,
                 "structural_failures": off_structure,
                 "detail": off_detail,
+                "error_class": off.error_class,
                 "tokens": off.usage.total,
                 "seconds": round(off.seconds, 3),
+                "initial": dict(off_outcome),
+                "usage": _usage_record(off.usage, 1, pricing),
+                "timing": {
+                    "audit_seconds": 0.0,
+                    "model_seconds": round(off.seconds, 3),
+                    "gate_seconds": 0.0,
+                    "application_seconds": round(off_apply_seconds, 3),
+                    "grading_seconds": round(off_grading_seconds, 3),
+                    "workflow_seconds": round(off.seconds + off_apply_seconds, 3),
+                    "end_to_end_seconds": round(off_end_to_end, 3),
+                },
+                "change": _change_metrics(case, off.edits, off_structure),
                 "plan": off.plan,
                 "patch": off.edits,
             },
@@ -434,16 +690,34 @@ def _run_pair(case: CaseAdapter, backend: Backend, trial: int, max_retries: int)
                 **common,
                 "arm": "on",
                 "status": "committed" if committed else "skipped-needs-human",
-                "landed": committed,
-                "correct_landed": on_correct,
-                "regression_shipped": committed and not on_behavior,
-                "incomplete_refactor_shipped": (committed and on_behavior and bool(on_structure)),
+                **on_outcome,
                 "oracle_pass": on_behavior if committed else None,
                 "structural_failures": on_structure,
                 "detail": on_detail,
                 "tokens": usage.total,
-                "seconds": round(seconds, 3),
+                "seconds": round(model_seconds, 3),
                 "retries": final.retries if final else max_retries,
+                "initial": {
+                    **initial_outcome,
+                    "detail": initial_detail,
+                    "structural_failures": initial_structure,
+                    "checks": initial_checks,
+                    "verification_status": attempt_records[0]["status"]
+                    if attempt_records
+                    else "proposal_error",
+                },
+                "attempts": attempt_records,
+                "usage": _usage_record(usage, len(attempts), pricing),
+                "timing": {
+                    "audit_seconds": round(audit_seconds, 3),
+                    "model_seconds": round(model_seconds, 3),
+                    "gate_seconds": round(gate_seconds, 3),
+                    "application_seconds": 0.0,
+                    "grading_seconds": round(grading_seconds, 3),
+                    "workflow_seconds": round(audit_seconds + model_seconds + gate_seconds, 3),
+                    "end_to_end_seconds": round(on_end_to_end, 3),
+                },
+                "change": _change_metrics(case, current.edits if current else {}, on_structure),
                 "harness_prompt": harness_prompt,
                 "patch": current.edits if current else {},
                 "checks": asdict(final.checks) if final else None,
@@ -451,11 +725,66 @@ def _run_pair(case: CaseAdapter, backend: Backend, trial: int, max_retries: int)
         ]
 
 
+def _clustered_delta_ci(
+    records: list[dict], field: str, *, samples: int = 5000, seed: int = 7
+) -> list[float]:
+    by_case: dict[str, list[float]] = {}
+    pairs: dict[tuple[str, int], dict[str, dict]] = {}
+    for record in records:
+        pairs.setdefault((record["case"], record["trial"]), {})[record["arm"]] = record
+    for (case, _), pair in pairs.items():
+        if set(pair) != {"off", "on"}:
+            continue
+        on_value = pair["on"][field]
+        off_value = pair["off"][field]
+        by_case.setdefault(case, []).append(float(on_value) - float(off_value))
+    case_deltas = [sum(values) / len(values) for values in by_case.values()]
+    if not case_deltas:
+        return [0.0, 0.0]
+    rng = random.Random(seed)
+    draws = sorted(
+        sum(rng.choice(case_deltas) for _ in case_deltas) / len(case_deltas) for _ in range(samples)
+    )
+    return [round(draws[int(samples * 0.025)], 3), round(draws[int(samples * 0.975)], 3)]
+
+
+def _paired_summary(records: list[dict], field: str) -> dict[str, object]:
+    pairs: dict[tuple[str, int], dict[str, dict]] = {}
+    for record in records:
+        pairs.setdefault((record["case"], record["trial"]), {})[record["arm"]] = record
+    wins = losses = ties = 0
+    for pair in pairs.values():
+        if set(pair) != {"off", "on"}:
+            continue
+        on_value = bool(pair["on"][field])
+        off_value = bool(pair["off"][field])
+        wins += on_value and not off_value
+        losses += off_value and not on_value
+        ties += on_value == off_value
+    return {
+        "on_wins": wins,
+        "off_wins": losses,
+        "ties": ties,
+        "on_minus_off_ci95_case_clustered": _clustered_delta_ci(records, field),
+    }
+
+
 def aggregate(records: list[dict]) -> dict[str, object]:
     arms: dict[str, dict[str, object]] = {}
     for arm in ("off", "on"):
         rows = [row for row in records if row["arm"] == arm]
         count = len(rows)
+        case_rates: dict[str, float] = {}
+        for case in sorted({row["case"] for row in rows}):
+            case_rows = [row for row in rows if row["case"] == case]
+            case_rates[case] = sum(row["correct_landed"] for row in case_rows) / len(case_rows)
+        case_unique_rates = []
+        for case in sorted({row["case"] for row in rows}):
+            hashes = {
+                row["change"]["patch_hash"] for row in rows if row["case"] == case
+            }
+            case_count = sum(row["case"] == case for row in rows)
+            case_unique_rates.append(len(hashes) / case_count)
         arms[arm] = {
             "runs": count,
             "correct_landed": sum(row["correct_landed"] for row in rows),
@@ -465,30 +794,148 @@ def aggregate(records: list[dict]) -> dict[str, object]:
             "regressions_shipped": sum(row["regression_shipped"] for row in rows),
             "incomplete_refactors_shipped": sum(row["incomplete_refactor_shipped"] for row in rows),
             "escalations": sum(row["status"] == "skipped-needs-human" for row in rows),
+            "initial_correct_landed": sum(row["initial"]["correct_landed"] for row in rows),
+            "initial_correct_landed_rate": round(
+                sum(row["initial"]["correct_landed"] for row in rows) / count, 3
+            )
+            if count
+            else 0.0,
+            "case_macro_correct_landed_rate": round(sum(case_rates.values()) / len(case_rates), 3)
+            if case_rates
+            else 0.0,
+            "safe_escalation_rate": round(
+                sum(row["status"] == "skipped-needs-human" for row in rows) / count, 3
+            )
+            if count
+            else 0.0,
+            "model_calls": sum(row["usage"]["model_calls"] for row in rows),
+            "input_tokens": sum(row["usage"]["input_tokens"] for row in rows),
+            "output_tokens": sum(row["usage"]["output_tokens"] for row in rows),
+            "cache_read_tokens": sum(row["usage"]["cache_read_tokens"] for row in rows),
+            "cache_write_tokens": sum(row["usage"]["cache_write_tokens"] for row in rows),
             "tokens": sum(row["tokens"] for row in rows),
+            "cost_dollars": round(sum(row["usage"]["cost_dollars"] or 0.0 for row in rows), 6)
+            if any(row["usage"]["cost_dollars"] is not None for row in rows)
+            else None,
             "seconds": round(sum(row["seconds"] for row in rows), 3),
+            "end_to_end_seconds": round(
+                sum(row["timing"]["end_to_end_seconds"] for row in rows), 3
+            ),
+            "required_path_recall": round(
+                sum(row["change"]["required_path_recall"] or 0.0 for row in rows) / count,
+                3,
+            )
+            if count
+            else 0.0,
+            "unrelated_edit_precision": round(
+                sum(row["change"]["unrelated_edit_precision"] or 0.0 for row in rows) / count,
+                3,
+            )
+            if count
+            else 0.0,
+            "total_churn": sum(row["change"]["total_churn"] for row in rows),
+            "unique_patch_rate": round(
+                sum(case_unique_rates) / len(case_unique_rates), 3
+            )
+            if case_unique_rates
+            else 0.0,
         }
-    return {"arms": arms}
+    on_rows = [row for row in records if row["arm"] == "on"]
+    rejected_initial = [
+        row for row in on_rows if row["initial"].get("verification_status") == "rolled-back"
+    ]
+    initial_bad = [row for row in rejected_initial if not row["initial"]["correct_landed"]]
+    false_rejections = [row for row in rejected_initial if row["initial"]["correct_landed"]]
+    gate_rejections: dict[str, int] = {}
+    all_attempts = [attempt for row in on_rows for attempt in row.get("attempts", [])]
+    for attempt in all_attempts:
+        if gate := attempt.get("failure_gate"):
+            gate_rejections[str(gate)] = gate_rejections.get(str(gate), 0) + 1
+    proposal_errors = [
+        row.get("error_class") for row in records if row.get("error_class") is not None
+    ] + [
+        attempt.get("error_class")
+        for attempt in all_attempts
+        if attempt.get("error_class") is not None
+    ]
+    return {
+        "arms": arms,
+        "paired_final": _paired_summary(records, "correct_landed"),
+        "paired_initial": _paired_summary(
+            [
+                {**row, "initial_correct_landed": row["initial"]["correct_landed"]}
+                for row in records
+            ],
+            "initial_correct_landed",
+        ),
+        "harness": {
+            "initial_rejections": len(rejected_initial),
+            "initial_bad_proposals_rejected": len(initial_bad),
+            "bad_proposals_caught_or_safely_escalated": sum(
+                not row["regression_shipped"] for row in initial_bad
+            ),
+            "false_rejections": len(false_rejections),
+            "repair_successes": sum(row["correct_landed"] for row in rejected_initial),
+            "repair_success_rate": round(
+                sum(row["correct_landed"] for row in rejected_initial) / len(rejected_initial),
+                3,
+            )
+            if rejected_initial
+            else None,
+            "rejections_by_gate": gate_rejections,
+            "rollback_integrity_failures": sum(
+                not bool(attempt.get("rollback_integrity")) for attempt in all_attempts
+            ),
+        },
+        "reliability": {
+            "configuration_failures": proposal_errors.count("configuration_failure"),
+            "provider_failures": proposal_errors.count("provider_failure"),
+            "malformed_responses": proposal_errors.count("malformed_response"),
+            "invalid_patches": proposal_errors.count("invalid_patch"),
+        },
+    }
 
 
-def run(backend: Backend, cases: tuple[CaseAdapter, ...], trials: int, max_retries: int) -> dict:
+def run(
+    backend: Backend,
+    cases: tuple[CaseAdapter, ...],
+    trials: int,
+    max_retries: int,
+    pricing: Pricing | None = None,
+) -> dict:
+    pricing = pricing or Pricing()
+    run_id = uuid.uuid4().hex
     records: list[dict] = []
     for trial in range(trials):
         for case in cases:
-            records.extend(_run_pair(case, backend, trial, max_retries))
+            records.extend(_run_pair(case, backend, trial, max_retries, pricing))
+    aggregate_result = aggregate(records)
+    reliability = cast(dict[str, int], aggregate_result["reliability"])
+    infrastructure_failures = (
+        reliability["configuration_failures"] + reliability["provider_failures"]
+    )
     return {
-        "status": "valid",
+        "status": "invalid-infrastructure" if infrastructure_failures else "valid",
         "meta": {
+            "schema_version": 2,
+            "run_id": run_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "backend": backend.name,
+            "model": backend.name,
+            "provider": getattr(backend, "provider", "test"),
+            "temperature": 0,
+            "git_revision": _git_revision(),
+            "release": os.environ.get("SENTRY_RELEASE") or _git_revision(),
             "methodology": "independent full-system proposals",
             "initial_user_prompt": USER_PROMPT,
             "cases": [case.name for case in cases],
             "trials": trials,
             "max_retries": max_retries,
+            "initial_model_calls_per_arm": 1,
+            "pricing_per_mtok": asdict(pricing),
         },
         "records": records,
-        "aggregate": aggregate(records),
+        "aggregate": aggregate_result,
     }
 
 
@@ -503,6 +950,17 @@ def _load_env(name: str) -> str | None:
     return None
 
 
+def _git_revision() -> str | None:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
 class HttpBackend:
     def __init__(self, provider: str, model: str, base_url: str, timeout: int = 300) -> None:
         self.provider = provider
@@ -515,7 +973,13 @@ class HttpBackend:
         if self.provider == "anthropic":
             key = _load_env("ANTHROPIC_API_KEY")
             if not key:
-                return Completion("", Usage(), 0.0, "ANTHROPIC_API_KEY is not configured")
+                return Completion(
+                    "",
+                    Usage(),
+                    0.0,
+                    "ANTHROPIC_API_KEY is not configured",
+                    "configuration_failure",
+                )
             url = "https://api.anthropic.com/v1/messages"
             headers = {
                 "Content-Type": "application/json",
@@ -549,14 +1013,19 @@ class HttpBackend:
                 )
                 raw_usage = data.get("usage", {})
                 usage = Usage(
-                    int(raw_usage.get("input_tokens", 0)), int(raw_usage.get("output_tokens", 0))
+                    input_tokens=int(raw_usage.get("input_tokens", 0)),
+                    output_tokens=int(raw_usage.get("output_tokens", 0)),
+                    cache_read_tokens=int(raw_usage.get("cache_read_input_tokens", 0)),
+                    cache_write_tokens=int(raw_usage.get("cache_creation_input_tokens", 0)),
                 )
             else:
                 text = data["choices"][0]["message"]["content"]
                 raw_usage = data.get("usage", {})
+                cached = int(raw_usage.get("prompt_tokens_details", {}).get("cached_tokens", 0))
                 usage = Usage(
-                    int(raw_usage.get("prompt_tokens", 0)),
-                    int(raw_usage.get("completion_tokens", 0)),
+                    input_tokens=max(int(raw_usage.get("prompt_tokens", 0)) - cached, 0),
+                    output_tokens=int(raw_usage.get("completion_tokens", 0)),
+                    cache_read_tokens=cached,
                 )
             return Completion(text, usage, round(time.perf_counter() - started, 3))
         except (
@@ -566,19 +1035,38 @@ class HttpBackend:
             ValueError,
             json.JSONDecodeError,
         ) as exc:
-            return Completion("", Usage(), round(time.perf_counter() - started, 3), str(exc))
+            capture_exception(
+                exc,
+                component="benchmark",
+                phase="provider_request",
+                tags={"model": self.model, "provider": self.provider},
+            )
+            return Completion(
+                "",
+                Usage(),
+                round(time.perf_counter() - started, 3),
+                str(exc),
+                "provider_failure",
+            )
 
 
 def main() -> int:
+    init_sentry("benchmark")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--provider", choices=("anthropic", "openai"), default="anthropic")
     parser.add_argument("--model", default="claude-sonnet-4-5-20250929")
     parser.add_argument("--base-url", default="http://localhost:11434/v1")
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--max-retries", type=int, default=2)
+    parser.add_argument("--input-cost-per-mtok", type=float, default=0.0)
+    parser.add_argument("--output-cost-per-mtok", type=float, default=0.0)
+    parser.add_argument("--cache-read-cost-per-mtok", type=float, default=0.0)
+    parser.add_argument("--cache-write-cost-per-mtok", type=float, default=0.0)
     parser.add_argument("--case", action="append", choices=[case.name for case in CASES])
     parser.add_argument("--calibrate-only", action="store_true")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--baseline", type=Path)
+    parser.add_argument("--regression-threshold", type=float, default=0.10)
     args = parser.parse_args()
     selected = tuple(case for case in CASES if not args.case or case.name in args.case)
     result = (
@@ -589,13 +1077,29 @@ def main() -> int:
             selected,
             args.trials,
             args.max_retries,
+            Pricing(
+                args.input_cost_per_mtok,
+                args.output_cost_per_mtok,
+                args.cache_read_cost_per_mtok,
+                args.cache_write_cost_per_mtok,
+            ),
         )
     )
     if args.calibrate_only and not result["calibration"]["valid"]:
         result["status"] = "void"
     destination = args.output or REPO_ROOT / "eval" / "results" / "full-system-latest.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(json.dumps(result, indent=2) + "\n")
+    try:
+        destination.write_text(json.dumps(result, indent=2) + "\n")
+    except OSError as exc:
+        capture_exception(exc, component="benchmark", phase="artifact_write")
+        raise
+    if args.baseline and not args.calibrate_only:
+        try:
+            baseline = json.loads(args.baseline.read_text())
+            capture_benchmark_regression(result, baseline, threshold=args.regression_threshold)
+        except (OSError, json.JSONDecodeError) as exc:
+            capture_exception(exc, component="benchmark", phase="baseline_read")
     if "aggregate" in result:
         print(json.dumps(result["aggregate"], indent=2))
     print(f"status: {result['status']} | result: {destination}")

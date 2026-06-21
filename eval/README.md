@@ -25,8 +25,8 @@ This is the product-level comparison. Both arms start from separate copies of
 the same case repository and receive the exact initial user request
 `refactor this codebase`:
 
-- **OFF** asks the model to inspect the repository and create its own plan, then
-  makes a separate model call to produce the patch from that plan.
+- **OFF** asks the model to inspect, select, and implement a refactor in one
+  autonomous model call.
 - **ON** has Refactorika audit the repository and build a dependency-ordered,
   architecture-aware prompt. The model proposes an independent patch, which is
   routed through atomic gates and up to two diagnostic-guided repairs.
@@ -34,6 +34,10 @@ the same case repository and receive the exact initial user request
 The grader then injects hidden tests and independently checks the intended
 structure. Hidden tests and case expectations are never included in either
 agent prompt.
+
+Both arms therefore receive one initial model call. ON may make additional
+diagnostic-guided repair calls; initial and final correctness are reported
+separately.
 
 ```bash
 make benchmark-full-calibrate

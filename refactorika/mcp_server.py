@@ -18,6 +18,7 @@ from .docs_gen import get_context_map as _get_context_map
 from .memory.agent_memory import AgentMemory
 from .memory.context import ContextRetriever
 from .memory.vector_index import VectorIndex
+from .observability import init_sentry, report_exceptions
 
 mcp = FastMCP("refactorika")
 
@@ -28,12 +29,14 @@ _context_retriever = ContextRetriever(_storage, _agent_memory)
 
 
 @mcp.tool()
+@report_exceptions("mcp", "analyze_file")
 def analyze_file(path: str) -> dict:
     """Find ranked structural-refactor opportunities in a Python file (read-only)."""
     return _analyze_file(path, _storage).to_dict()
 
 
 @mcp.tool()
+@report_exceptions("mcp", "find_duplicates")
 def find_duplicates(path: str, threshold: float = 0.83) -> dict:
     """Detect duplicate functions in a file or directory (read-only).
 
@@ -45,6 +48,7 @@ def find_duplicates(path: str, threshold: float = 0.83) -> dict:
 
 
 @mcp.tool()
+@report_exceptions("mcp", "find_dead_code")
 def find_dead_code(path: str) -> dict:
     """Detect unreachable symbols in a file or directory via call-graph reachability (read-only).
 
@@ -55,6 +59,7 @@ def find_dead_code(path: str) -> dict:
 
 
 @mcp.tool()
+@report_exceptions("mcp", "apply_and_verify")
 def apply_and_verify(path: str, new_content: str, refactor_kind: str) -> dict:
     """Apply Claude's proposed file contents, run the gate stack, commit or roll back atomically.
 
@@ -64,6 +69,7 @@ def apply_and_verify(path: str, new_content: str, refactor_kind: str) -> dict:
 
 
 @mcp.tool()
+@report_exceptions("mcp", "apply_and_verify_multi")
 def apply_and_verify_multi(edits: dict, refactor_kind: str) -> dict:
     """Multi-file atomic apply: snapshot all → gates → one commit or restore all.
 
@@ -75,6 +81,7 @@ def apply_and_verify_multi(edits: dict, refactor_kind: str) -> dict:
 
 
 @mcp.tool()
+@report_exceptions("mcp", "generate_docs")
 def generate_docs(path: str) -> dict:
     """Extract module context and persist to agent memory + .refactorika/context/<module>.md.
 
@@ -85,6 +92,7 @@ def generate_docs(path: str) -> dict:
 
 
 @mcp.tool()
+@report_exceptions("mcp", "get_context_map")
 def get_context_map(path: str) -> dict:
     """Return accumulated cross-session context for a module from agent memory (read-only).
 
@@ -94,6 +102,7 @@ def get_context_map(path: str) -> dict:
 
 
 @mcp.tool()
+@report_exceptions("mcp", "audit_repo")
 def audit_repo(path: str) -> dict:
     """Ranked repo-wide structural-opportunity report across all files (read-only, advisory).
 
@@ -104,8 +113,9 @@ def audit_repo(path: str) -> dict:
 
 
 @mcp.tool()
+@report_exceptions("mcp", "get_plan")
 def get_plan(path: str) -> dict:
-    """Dependency-ordered refactor plan (fewest-dependents-first); persists it (read-only, advisory).
+    """Build and persist a dependency-ordered refactor plan (read-only, advisory).
 
     Orders deviating files low-blast-radius-first so later edits land on stable
     ground. The plan is saved as the current plan for confirm_plan to gate.
@@ -114,6 +124,7 @@ def get_plan(path: str) -> dict:
 
 
 @mcp.tool()
+@report_exceptions("mcp", "confirm_plan")
 def confirm_plan(decision: str = "approve", order: list[str] | None = None) -> dict:
     """Human checkpoint: approve / reject / reorder the persisted plan. Never changes code.
 
@@ -139,12 +150,14 @@ def confirm_plan(decision: str = "approve", order: list[str] | None = None) -> d
 
 
 @mcp.tool()
+@report_exceptions("mcp", "get_log")
 def get_log() -> list[dict]:
     """Return the append-only edit log (powers the dashboard)."""
     return _storage.get_log()
 
 
 def main() -> None:
+    init_sentry("mcp")
     mcp.run()
 
 
