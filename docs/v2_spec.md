@@ -1,3 +1,5 @@
+> **⚠ HISTORICAL — not maintained.** Preserved as a record of how the project evolved. For current docs see [docs/README.md](README.md).
+
 # Refactorika — Build Spec (v2, SUPERSEDED)
 
 > ⚠️ **Superseded by [`v3_spec.md`](v3_spec.md).** This document describes the earlier

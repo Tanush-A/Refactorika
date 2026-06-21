@@ -1,5 +1,9 @@
 # Refactorika
 
+> 📚 **Full documentation: [`docs/`](docs/README.md).** New here? **Refactorika has two branches** —
+> `working` (the demo: MCP agent harness + four-arm benchmark) and `main` (this branch: the v3
+> graph engine). Read **[docs/branches.md](docs/branches.md)** first.
+
 A **graph-driven, verified refactoring engine** for Python. Point it at a repo; it builds a
 reference-correct model of the whole program, plans a safe dependency order, applies
 deterministic transforms, and **proves nothing broke** — committing each verified change and

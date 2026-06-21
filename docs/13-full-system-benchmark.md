@@ -1,3 +1,5 @@
+> **⚠ HISTORICAL — not maintained.** Preserved as a record of how the project evolved. For current docs see [docs/README.md](README.md).
+
 # Full-System Refactorika Benchmark
 
 ## Claim

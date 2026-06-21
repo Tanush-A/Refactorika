@@ -1,3 +1,5 @@
+> **⚠ HISTORICAL — not maintained.** Preserved as a record of how the project evolved. For current docs see [docs/README.md](README.md).
+
 # Four-Arm Agent Benchmark Contract
 
 This contract is frozen before the agent runtime is refactored. Diagnostic

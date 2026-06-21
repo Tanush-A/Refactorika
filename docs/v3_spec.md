@@ -1,3 +1,7 @@
+> **ℹ Scope:** This spec describes the **`main`** v3 graph engine. For the full, branch-aware doc set
+> (incl. the **`working`** demo branch and the four-arm benchmark) start at
+> [docs/README.md](README.md) and [branches.md](branches.md).
+
 # Refactorika — v3 Spec (the as-built engine)
 
 > **This is the source of truth.** It describes the product as actually built and tested,

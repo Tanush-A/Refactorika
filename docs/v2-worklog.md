@@ -1,3 +1,5 @@
+> **⚠ HISTORICAL — not maintained.** Preserved as a record of how the project evolved. For current docs see [docs/README.md](README.md).
+
 # v2 Worklog — gaps between the shipped V2 implementation and `v2_spec.md`
 
 > **STATUS:** all buckets A–E done; demo runs end-to-end (analyze → find_duplicates → find_dead_code → generate_docs → good-edit-commits → bad-edit-caught → dashboard); 52 tests green.

@@ -1,3 +1,5 @@
+> **⚠ HISTORICAL — not maintained.** Preserved as a record of how the project evolved. For current docs see [docs/README.md](README.md).
+
 # refactorika — Build Plan (v2)
 
 Berkeley AI Hackathon. A standalone tool that refactors a codebase as a whole-program problem: it removes dead code, cuts line count, and restructures across files, using a code graph for understanding, deterministic engines for the edits, Redis as the shared memory that holds the graph and the agents' decisions, and verification to keep the repo working.

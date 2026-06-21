@@ -1,3 +1,5 @@
+> **⚠ HISTORICAL — not maintained.** Preserved as a record of how the project evolved. For current docs see [docs/README.md](README.md).
+
 # Refactorika Benchmark — Display & Reporting Spec
 
 > ⚠️ **Superseded / folded into [11-benchmarks-and-eval.md](11-benchmarks-and-eval.md).** The

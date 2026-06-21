@@ -1,3 +1,5 @@
+> **⚠ HISTORICAL — not maintained.** Preserved as a record of how the project evolved. For current docs see [docs/README.md](README.md).
+
 # v3 Roadmap — Repo-Wide Refactoring, Call-Site Verification & Observability
 
 > ⚠️ **SUPERSEDED — original brainstorm, kept for context.** The active, codebase-reconciled plan is **`docs/v3_spec.md`** (ships §0 CallGraph reconcile + §1 audit/plan/confirm + the campaign dashboard). The two items below that are *not* in the active build — the call-site sweep gate (§2) and Sentry (§3) — are parked in **`docs/v3-worklog.md`** with the reasons. Note this roadmap predates V2 and is stale where it treats `analysis/call_graph.py` as new (V2 already shipped it) — see the spec for the reconciliation.

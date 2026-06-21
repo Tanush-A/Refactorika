@@ -1,3 +1,5 @@
+> **ℹ Scope:** This usage guide targets the **`main`** engine CLI. For the **`working`** demo (MCP server, `scan`/`fix`, the four-arm benchmark) see [cli-and-mcp.md](cli-and-mcp.md) and [evaluation.md](evaluation.md). Start: [docs/README.md](README.md).
+
 # Using Refactorika — the complete how-to
 
 Every way to run the tool and exercise all of its functionality. For *how it works

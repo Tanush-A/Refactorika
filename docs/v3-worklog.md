@@ -1,3 +1,5 @@
+> **⚠ HISTORICAL — not maintained.** Preserved as a record of how the project evolved. For current docs see [docs/README.md](README.md).
+
 # v3 Worklog — parked items (not in the active `v3_spec.md`)
 
 > Things from the v3 roadmap (`docs/13-v3-roadmap.md`) deliberately deferred out of the active v3 build. The active spec (`docs/v3_spec.md`) ships §0 CallGraph reconcile + §1 audit/plan/confirm + the campaign dashboard. These two are parked — both real, both need more thought before they help a demo.

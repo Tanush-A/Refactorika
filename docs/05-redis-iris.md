@@ -1,3 +1,5 @@
+> **⚠ HISTORICAL — not maintained.** Preserved as a record of how the project evolved. For current docs see [docs/README.md](README.md).
+
 # Redis Iris — The Shared Brain
 
 > **See [v3_spec.md §8](v3_spec.md) for the as-built design.** This page summarizes the role

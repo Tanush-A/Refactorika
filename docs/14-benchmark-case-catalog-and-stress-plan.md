@@ -1,3 +1,5 @@
+> **⚠ HISTORICAL — not maintained.** Preserved as a record of how the project evolved. For current docs see [docs/README.md](README.md).
+
 # Benchmark Case Catalog and Refactoring Stress Plan
 
 This document describes the benchmark code as it exists today and catalogs a
