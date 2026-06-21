@@ -116,3 +116,16 @@ def test_git_tools_do_not_mutate_repository(repo: Path) -> None:
     tools = DeveloperTools(repo)
     assert tools.git_status().ok
     assert tools.git_diff().ok
+
+
+def test_git_tools_are_clean_for_materialized_non_git_fixture(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n")
+    tools = DeveloperTools(tmp_path)
+
+    status = tools.git_status()
+    diff = tools.git_diff()
+
+    assert status.ok and status.data == ""
+    assert diff.ok and diff.data == ""
+    assert status.metadata == {"git_repository": False, "benchmark_baseline_clean": True}
+    assert diff.metadata == {"git_repository": False, "benchmark_baseline_clean": True}

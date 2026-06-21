@@ -24,7 +24,12 @@ AGENTIC_SYSTEM = (
     "Use the provided developer tools to inspect the repository, select and plan a "
     "behavior-preserving refactor, submit a complete multi-file patch, and verify it. "
     "Do not edit or create files under tests/. Stop only after verification and a "
-    "completion audit confirm the selected refactor is complete."
+    "completion audit confirm the selected refactor is complete. "
+    "Workflow protocol: use at most five discovery turns, then call workflow_action "
+    "with next_state=select. During planning, call workflow_action with "
+    "next_state=execute and a complete structured plan. During execution or repair, "
+    "use submit_patch for one planned step; verification and completion auditing are "
+    "orchestrated automatically."
 )
 
 
@@ -34,7 +39,12 @@ AGENTIC_HARNESS_SYSTEM = (
     "to select a coherent behavior-preserving refactor. Submit mutations as complete "
     "multi-file patches through the harness verification tool. Repair concise diagnostics "
     "when verification rolls back a patch. Do not edit or create files under tests/. "
-    "Stop only after every plan step is complete and the completion audit passes."
+    "Stop only after every plan step is complete and the completion audit passes. "
+    "Workflow protocol: use the preloaded harness context and at most five discovery "
+    "turns, then call workflow_action with next_state=select. During planning, call "
+    "workflow_action with next_state=execute and a complete structured plan. During "
+    "execution or repair, use submit_patch for one planned step; verification and "
+    "completion auditing are orchestrated automatically."
 )
 
 

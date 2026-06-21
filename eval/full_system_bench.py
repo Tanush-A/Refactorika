@@ -1523,7 +1523,7 @@ class AgenticBackend(_SharedAgentBackend):
         self,
         model: str,
         api_key: str,
-        max_iterations: int = 20,
+        max_iterations: int = 30,
         bash_timeout: int = 30,
         request_timeout: int = DEFAULT_REQUEST_TIMEOUT,
         agent_timeout: int = DEFAULT_AGENT_TIMEOUT,
@@ -1565,7 +1565,7 @@ class AgenticHarnessBackend(_SharedAgentBackend):
         self,
         model: str,
         api_key: str,
-        max_iterations: int = 20,
+        max_iterations: int = 30,
         bash_timeout: int = 30,
         request_timeout: int = DEFAULT_REQUEST_TIMEOUT,
         agent_timeout: int = DEFAULT_AGENT_TIMEOUT,
@@ -1637,14 +1637,14 @@ def main() -> int:
         help="add agentic tool-use arm (requires ANTHROPIC_API_KEY)",
     )
     parser.add_argument("--agentic-model", default="claude-sonnet-4-5-20250929")
-    parser.add_argument("--agentic-max-iter", type=int, default=20)
+    parser.add_argument("--agentic-max-iter", type=int, default=30)
     parser.add_argument(
         "--agentic-mcp",
         action="store_true",
         help="add agentic+mcp arm (requires ANTHROPIC_API_KEY)",
     )
     parser.add_argument("--agentic-mcp-model", default="claude-sonnet-4-5-20250929")
-    parser.add_argument("--agentic-mcp-max-iter", type=int, default=20)
+    parser.add_argument("--agentic-mcp-max-iter", type=int, default=30)
     args = parser.parse_args()
     progress = None if args.quiet_progress else _console_progress
     selected = tuple(case for case in CASES if not args.case or case.name in args.case)

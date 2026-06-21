@@ -57,6 +57,67 @@ _PATCH_PROPERTIES = {
     "plan_step": {"type": "string"},
 }
 
+_PLAN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "objective": {"type": "string", "minLength": 1},
+        "rationale": {"type": "string", "minLength": 1},
+        "affected_paths": {"type": "array", "items": {"type": "string"}},
+        "expected_call_sites": {"type": "array", "items": {"type": "string"}},
+        "compatibility_requirements": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "structural_postconditions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "minLength": 1},
+                    "path": {"type": "string", "minLength": 1},
+                    "symbol": {"type": "string"},
+                    "detail": {"type": "string"},
+                },
+                "required": ["kind", "path"],
+                "additionalProperties": False,
+            },
+        },
+        "steps": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "minLength": 1},
+                    "objective": {"type": "string", "minLength": 1},
+                    "affected_paths": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string"},
+                    },
+                    "dependencies": {"type": "array", "items": {"type": "string"}},
+                    "verification_requirements": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["id", "objective", "affected_paths"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": [
+        "objective",
+        "rationale",
+        "affected_paths",
+        "expected_call_sites",
+        "compatibility_requirements",
+        "structural_postconditions",
+        "steps",
+    ],
+    "additionalProperties": False,
+}
+
 
 def developer_tool_schemas() -> list[dict[str, Any]]:
     """Return the identical model-visible tool contract used by both loop arms."""
@@ -128,7 +189,7 @@ def developer_tool_schemas() -> list[dict[str, Any]]:
                         if state is not WorkflowState.DISCOVER
                     ],
                 },
-                "plan": {"type": "object"},
+                "plan": _PLAN_SCHEMA,
                 "termination_reason": {
                     "type": "string",
                     "enum": [reason.value for reason in TerminationReason],
@@ -214,6 +275,11 @@ class SharedAgentDriver:
     def __call__(self, state: WorkflowState, context: LoopContext) -> LoopAction:
         if state is WorkflowState.SELECT:
             return LoopAction(WorkflowState.PLAN)
+        if state is WorkflowState.PLAN and self._plan is not None:
+            # A model may select a candidate and provide its structured plan in one
+            # action. The preceding DISCOVER action is normalized through SELECT,
+            # then this zero-call action preserves the required PLAN state.
+            return LoopAction(WorkflowState.EXECUTE, plan=self._plan)
         if state is WorkflowState.VERIFY:
             if self._last_patch_ok is None:
                 raise MalformedResponseError("VERIFY reached before submit_patch")
@@ -268,8 +334,20 @@ class SharedAgentDriver:
                 declaration = arguments
                 result = ToolResult(status="ok", data={"accepted": True})
             else:
-                plan_step = self._validate_plan_step(arguments) if name == "submit_patch" else None
-                result = self._invoke(name, arguments)
+                plan_step: PlanStep | None = None
+                if name == "submit_patch":
+                    try:
+                        plan_step = self._validate_plan_step(arguments)
+                    except MalformedResponseError as exc:
+                        result = ToolResult(
+                            status="error",
+                            error=str(exc),
+                            error_class="InvalidPlanStep",
+                        )
+                    else:
+                        result = self._invoke(name, arguments)
+                else:
+                    result = self._invoke(name, arguments)
                 if name == "submit_patch":
                     self._last_patch_ok = result.ok
                     if result.ok:
@@ -290,9 +368,40 @@ class SharedAgentDriver:
         if tool_results:
             self.messages.append({"role": "user", "content": tool_results})
 
-        next_state, plan, reason, error = self._decode_action(
-            state, declaration, submitted=bool(submitted_edits)
-        )
+        try:
+            next_state, plan, reason, error = self._decode_action(
+                state, declaration, submitted=bool(submitted_edits)
+            )
+        except MalformedResponseError as exc:
+            if state is not WorkflowState.PLAN:
+                raise
+            self.messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "The planning action was rejected. Return workflow_action again with "
+                        "next_state=execute and a plan satisfying the complete tool schema. "
+                        f"Validation error: {exc}"
+                    ),
+                }
+            )
+            usage = completion.usage
+            return LoopAction(
+                next_state=WorkflowState.PLAN,
+                model_calls=1,
+                tool_events=events,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cache_read_tokens=usage.cache_read_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
+                metadata={
+                    "provider_seconds": completion.seconds,
+                    "planning_schema_retries": int(
+                        context.metadata.get("planning_schema_retries", 0)
+                    )
+                    + 1,
+                },
+            )
         if plan is not None:
             self._plan = plan
         usage = completion.usage
@@ -513,6 +622,13 @@ class SharedAgentDriver:
             raise MalformedResponseError(f"invalid workflow_action: {exc}") from exc
         if state is WorkflowState.PLAN and plan is None:
             raise MalformedResponseError("planning transition requires a structured plan")
+        if state is WorkflowState.DISCOVER and plan is not None and next_state in {
+            WorkflowState.PLAN,
+            WorkflowState.EXECUTE,
+        }:
+            # Selection is a required bookkeeping state but deliberately consumes no
+            # model call. Preserve that state without rejecting a combined model action.
+            next_state = WorkflowState.SELECT
         return next_state, plan, reason, _optional_string(declaration.get("error"))
 
     def _invoke(self, name: str, arguments: dict[str, Any]) -> ToolResult:
