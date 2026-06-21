@@ -101,7 +101,7 @@ Claude (reasoning agent)
 
 1. **Parse** — `tree-sitter-python` must parse the edited content (no `ERROR`/`MISSING`). Runs before touching disk.
 2. **Lint/format** — `ruff format` to normalize, then reject only *new* violations vs. the pre-edit baseline.
-3. **Type** — `pyright`; zero errors or roll back.
+3. **Type** — `pyright`; reject only *new* type errors vs. the pre-edit baseline (like lint). Roll back if the edit raises the error count.
 4. **Behavior** — `pytest` over tests covering the touched file. Roll back on fail; record a **skip** (never a silent pass) where no test covers the file.
 5. **Re-propose** — bounded retries; the failure reason is surfaced back to Claude.
 6. **Escalate** — retries exhausted → mark `skipped-needs-human`, revert to last good state, flag it. Never force-commit.

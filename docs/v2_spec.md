@@ -276,11 +276,11 @@ def embed_one(text: str) -> list[float]: ...
 def available() -> bool: ...   # False if neither provider importable
 ```
 
-- **Default (offline, no key):** `sentence-transformers` `all-MiniLM-L6-v2` (384-dim). Lazy-import inside the function so importing the module never pulls torch.
-- **Optional (higher quality):** OpenAI `text-embedding-3-small` (1536-dim) when `OPENAI_API_KEY` is set. Provider selected by env: `REFACTORIKA_EMBED=local|openai` (default `local`).
-- **Packaging:** the heavy deps (`sentence-transformers`/torch) live behind the **`refactorika[semantic]` optional extra**. Without it, `available()` is `False`, duplicate detection runs structural-only, and tools degrade gracefully (never crash on a missing import).
-- **Dimension** is provider-dependent — store it alongside vectors so a provider switch invalidates cleanly (namespace the vector index by `{provider}:{dim}`).
-- Cosine via `numpy` (a core dep). Batch in `embed`.
+- **Primary:** OpenAI `text-embedding-3-small` (1536-dim) when `OPENAI_API_KEY` is set. Provider selected by env: `REFACTORIKA_EMBED=openai|local` (default `openai` if a key is present, else `local`).
+- **Keyless fallback:** `sentence-transformers` `all-MiniLM-L6-v2` (384-dim), offline. Lazy-import inside the function so importing the module never pulls torch.
+- **Packaging:** the deps (`openai`, `sentence-transformers`/torch, `redisvl`) live behind the **`refactorika[semantic]` optional extra**. Without it, `available()` is `False`, duplicate detection runs structural-only, and tools degrade gracefully (never crash on a missing import).
+- **Dimension** is provider-dependent — store it alongside vectors so a provider switch invalidates cleanly (namespace the hybrid index by `{provider}:{dim}`).
+- Search runs through **RedisVL hybrid queries** (see §7.2), not raw cosine; brute-force `numpy` cosine is only the offline fallback. Batch in `embed`.
 
 ---
 
@@ -291,10 +291,12 @@ Per `05-redis-iris.md`: **four cooperating components**, Redis primary, local fa
 ### 7.1 AST-keyed cache (shipped — `core/storage.py`)
 Redis hash `refactorika:cache`, keyed on normalized AST signature. **Exact key, never fuzzy.** Used by `analyze_file`, tier-1 fingerprints, ruff baselines.
 
-### 7.2 Vector index (`memory/vector_index.py`) — build
-- **Preferred backend:** RediSearch vector index (HNSW, cosine) so Redis Insight visibly shows the populated index during the demo. Index name `refactorika:vec:{provider}:{dim}`; each doc = `{file}:{fn}` with fields `embedding (FLOAT32[dim])`, `file`, `name`, `line`.
-- **API:** `upsert(key, vector, meta)` · `query(vector, k=5, threshold) -> [Neighbor{key,score,meta}]` · `drop()`.
-- **Fallback [decide §14]:** when RediSearch is unavailable, persist `{key: {vector, meta}}` to `.refactorika/state.json` under a `vectors` map and brute-force numpy cosine — slower, identical results. (Try `FT.INFO`; on error use JSON.)
+### 7.2 Hybrid search index (`memory/vector_index.py`) — build, via **RedisVL**
+- **Backend:** a RedisVL `SearchIndex` (Redis 8.4+ Query Engine — Redis Cloud / Redis Stack). Index `refactorika:vec:{provider}:{dim}`; each doc = `{file}:{fn}` with fields: `embedding` (vector, HNSW, cosine, `dims`), `body` (text, BM25STD), and `file`/`module`/`fingerprint` (tags).
+- **API:** `upsert(key, vector, text, meta)` · `query_hybrid(vector, text, k=5, filters=None) -> [Neighbor{key,score,meta}]` (runs `HybridQuery`, RRF fusion) · `drop()`. A vector-only `query(...)` stays for callers that don't have query text.
+- **Why hybrid:** pure cosine is weak on code (misses exact identifiers, false-positives on unrelated helpers). `FT.HYBRID` fuses BM25 (identifiers/body) with vector (meaning) — Redis reports 3–3.5× recall, +11–15% accuracy vs. single-mode. RRF default; linear+alpha only if one signal should dominate.
+- **Fallback:** when no Query Engine is reachable (bare `redis-server` or offline), persist `{key:{vector,text,meta}}` to `.refactorika/state.json` and brute-force numpy cosine — vector-only (no BM25), same correctness floor. (Detect via RedisVL connection / `FT._LIST`; on error use JSON.)
+- **Deps:** `redisvl` (+ `redis-py` ≥ 7.1) in the `[semantic]` extra.
 
 ### 7.3 Agent memory (`memory/agent_memory.py`) — build, **cross-session**
 - **Stores:** per-module context (`ModuleContext` from `generate_docs`), architectural decisions, and refactor history (the `EditRecord` stream — generalizes the existing `refactorika:log`).
@@ -353,13 +355,13 @@ refactorika/
 
 | Package | Where | Why |
 |---|---|---|
-| `numpy` | core | cosine similarity, vector math |
-| `redis` | core (exists) | Redis Iris client |
-| `sentence-transformers` | **`[semantic]` extra** | default offline embeddings (pulls torch ~2GB) — lazy-import, optional |
-| `redisvl` / `redis[search]` **[decide §14]** | `[semantic]` extra | RediSearch vector index (else JSON+numpy fallback) |
-| `openai` | `[semantic]` extra | optional embedding provider |
+| `numpy` | core | brute-force cosine fallback, vector math |
+| `redis` | core (exists) | Redis client (cache + agent memory) |
+| `redisvl` | **`[semantic]` extra** | RedisVL — index schema + `HybridQuery` (FT.HYBRID); needs redis-py ≥ 7.1 |
+| `openai` | `[semantic]` extra | primary embedding provider (`text-embedding-3-small`) |
+| `sentence-transformers` | `[semantic]` extra | keyless/offline embedding fallback (pulls torch ~2GB) — lazy-import |
 
-Clean install stays light (structural duplicate detection + everything else works); `pip install refactorika[semantic]` adds semantic dup detection and the RediSearch index. Tools degrade gracefully when the extra is absent.
+Clean install stays light (structural duplicate detection + everything else works); `pip install 'refactorika[semantic]'` adds the embedding providers + RedisVL hybrid search. Tools degrade gracefully when the extra is absent (structural-only) or when no Query Engine is reachable (brute-force vector fallback).
 
 ---
 

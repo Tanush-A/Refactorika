@@ -48,11 +48,11 @@ Target: **small-to-medium Python codebases** — single-package or small multi-f
 - **Language:** Python 3.11+ (harness **and** target).
 - **MCP:** `mcp` Python SDK (`FastMCP`) — exposes capabilities as tools Claude invokes inline.
 - **Parse/analyze:** `tree-sitter` + `tree-sitter-python` — boundaries, import blocks, nesting depth, normalized AST fingerprints, the symbol graph for dead-code reachability.
-- **Type gate:** `pyright` — refactored output must stay type-safe.
+- **Type gate:** `pyright` — reject only *new* type errors vs. pre-edit baseline (like lint; absolute "must be type-perfect" over-rejects correct code).
 - **Lint/format gate:** `ruff` — normalize formatting, reject only *new* violations vs. pre-edit baseline.
 - **Behavior gate:** `pytest` — type-clean ≠ behavior-preserving; catches silent regressions; *proves* dead-code/dup removals are safe.
-- **Duplicate/dead-code analysis:** structural AST fingerprint (precise clones) **+** semantic embeddings — default `sentence-transformers` (local/offline, no key); optional `text-embedding-3-small` via OpenAI when `OPENAI_API_KEY` set. Call-graph reachability for dead code.
-- **Memory/state — Redis Iris (primary, JSON fallback):** four components — LangCache/AST-keyed cache · Vector Index (`{file}:{fn}` embeddings) · Agent Memory (cross-session context + refactor history) · Context Retriever (structured + vector). **Always degrades to local `.refactorika/` files** so the demo runs offline. Full detail: `docs/05-redis-iris.md`.
+- **Duplicate/dead-code analysis:** structural AST fingerprint (precise clones) **+** hybrid search — embeddings (`text-embedding-3-small` via OpenAI primary; `sentence-transformers` keyless fallback) fused with BM25 via Redis `FT.HYBRID`. Call-graph reachability for dead code.
+- **Memory/state — Redis Iris via RedisVL (primary, JSON fallback):** four components — LangCache/AST-keyed cache · **Hybrid Search Index** (per-fn vector + BM25 + tags, `FT.HYBRID` RRF-fused — strictly better than pure cosine on code) · Agent Memory (cross-session context + refactor history) · Context Retriever (tag/num filters + hybrid retrieval). Hybrid needs Redis 8.4+ Query Engine (Redis Cloud/Stack); **degrades to local `.refactorika/` files / brute-force** offline. Full detail: `docs/05-redis-iris.md`.
 
 ## Architecture — one core, thin shells
 - **Interface-agnostic core library** (`refactorika/core/` + `analysis/` + `memory/`) holds all logic: analysis, gate stack, transforms, Iris memory. Reads/writes state itself so every shell sees the same thing. Canonical package is top-level **`refactorika/`** — the old `src/refactorika/` skeleton is abandoned, do not add to it.
